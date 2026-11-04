@@ -2360,6 +2360,10 @@ internal sealed class DeckForm : Form
 
         try
         {
+            // A Twitch leve vem ligada de fábrica; os testes do player da Twitch são com ele tocando, e a Twitch leve
+            // tem o teste dela (que liga na conta 1).
+            bool lightByDefault = _config.TwitchLight.All(l => l);
+            _config.TwitchLight = new bool[Accounts];
             bool loaded = await WaitFor(() => _panes.Take(3).All(p => p.Status == PaneStatus.Ok), 40);
             Check("conta desligada ao abrir o deck não carrega nada",
                 loaded && _panes[3].Off && _panes[3].Core is null && _panes[3].StatusText == "desligada",
@@ -3363,6 +3367,17 @@ internal sealed class DeckForm : Form
                 && perAccount.RedeemKick.SequenceEqual(new KickReward?[] { KickReward.Capture, null, KickReward.Xp, null })
                 && new DeckConfig().RedeemKick.All(r => r is null),
                 $"antes→{string.Join(",", redeemConfig.RedeemKick)} por conta→{string.Join(",", perAccount.RedeemKick.Select(r => r?.ToString() ?? "não"))}");
+
+            // A Twitch leve vem ligada de fábrica em todas as contas, também no deck.json de antes (sem o campo); a conta
+            // desligada em Lives → Config… fica salva (a lista curta, editada à mão, completa ligada).
+            File.WriteAllText(redeemPath, "{ \"TwitchLives\": 2 }");
+            var lightOld = DeckConfig.Load(redeemPath);
+            File.WriteAllText(redeemPath, "{ \"TwitchLight\": [ false, true ] }");
+            var lightSaved = DeckConfig.Load(redeemPath);
+            Check("Twitch leve: ligada de fábrica em todas as contas (no deck.json de antes também), e a desligada fica salva",
+                lightByDefault && new DeckConfig().TwitchLight.All(l => l) && lightOld.TwitchLight.All(l => l)
+                && lightSaved.TwitchLight.SequenceEqual(new[] { false, true, true, true }),
+                $"autoteste={lightByDefault} de antes={string.Join(",", lightOld.TwitchLight)} salva={string.Join(",", lightSaved.TwitchLight)}");
             await WaitFor(() => _panes.All(p => p.Status == PaneStatus.Ok), 20);
             _kickLive.Clear();
 
