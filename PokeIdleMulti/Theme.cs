@@ -39,6 +39,32 @@ internal static class Theme
     /// <summary>O ícone do deck (o mesmo do exe), na barra de título e na barra de tarefas.</summary>
     public static Icon AppIcon { get; } = new(typeof(Theme).Assembly.GetManifestResourceStream("deck.ico")!);
 
+    /// <summary>
+    /// Texto de dica com limite: quebra cada linha nos espaços em até <paramref name="width"/> letras (a dica da barra
+    /// não quebra sozinha e cresce pela tela inteira) e corta em <paramref name="maxLines"/> linhas, com "…".
+    /// </summary>
+    public static string Wrap(string text, int width = 60, int maxLines = 12)
+    {
+        var lines = new List<string>();
+        foreach (var paragraph in text.Replace("\r\n", "\n").Split('\n'))
+        {
+            var line = new System.Text.StringBuilder();
+            foreach (var word in paragraph.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (line.Length > 0 && line.Length + 1 + word.Length > width)
+                {
+                    lines.Add(line.ToString());
+                    line.Clear();
+                }
+                line.Append(line.Length > 0 ? " " : "").Append(word);
+            }
+            lines.Add(line.ToString());
+        }
+        if (lines.Count > maxLines)
+            lines = lines.Take(maxLines - 1).Append("…").ToList();
+        return string.Join("\n", lines);
+    }
+
     [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
 

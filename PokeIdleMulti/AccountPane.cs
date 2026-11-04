@@ -484,8 +484,11 @@ internal sealed class AccountPane : UserControl
     {
         _lives.Enabled = _kick.Enabled || _twitch.Enabled;
         _lives.ForeColor = _kick.Closed || _twitch.Closed ? Theme.Accent : Theme.Text;
-        _lives.ToolTipText = $"Kick: {_kick.Tooltip}\nTwitch: {_twitch.Tooltip}";
+        _lives.ToolTipText = Theme.Wrap($"Kick: {_kick.Tooltip}\nTwitch: {_twitch.Tooltip}");
     }
+
+    /// <summary>A dica do botão lives, para o autoteste.</summary>
+    public string LivesTip => _lives.ToolTipText ?? "";
 
     /// <summary>A parte de cada site do botão lives ("ligado", "apagado" ou "fechada"), para o autoteste.</summary>
     public string KickState => _kick.Closed ? "fechada" : _kick.Enabled ? "ligado" : "apagado";

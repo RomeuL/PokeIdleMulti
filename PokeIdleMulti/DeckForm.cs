@@ -237,17 +237,17 @@ internal sealed class DeckForm : Form
         _fullscreenButton.Click += (_, _) => ToggleFullscreen();
         _extensionsButton.ToolTipText = "Instalar e gerenciar as extensões de cada conta";
         _extensionsButton.Click += (_, _) => OpenExtensions();
-        _livesButton.ToolTipText = "Lives da Twitch e da Kick tocando em segundo plano, juntando os pontos dos canais (o bônus das lives no jogo)";
+        _livesButton.ToolTipText = Theme.Wrap("Lives da Twitch e da Kick tocando em segundo plano, juntando os pontos dos canais (o bônus das lives no jogo)");
         // Com o Shift apertado aparece também o resgate em lote, escondido.
         _livesButton.DropDownOpening += (_, _) => FillLivesMenu((ModifierKeys & Keys.Shift) == Keys.Shift);
         _livesButton.DropDownItems.Add("…");
         _kickButton.Alignment = ToolStripItemAlignment.Right;
-        _kickButton.ToolTipText = "Abre os chats da Kick da conta, para resgatar os pontos do canal (300 pontos = 1 h de +15% de XP)";
+        _kickButton.ToolTipText = Theme.Wrap("Abre os chats da Kick da conta, para resgatar os pontos do canal (300 pontos = 1 h de +15% de XP)");
         _kickButton.DropDownOpening += (_, _) => FillPointsMenu(LiveSite.Kick);
         _kickButton.DropDownItems.Add("…");
         _twitchButton.Alignment = ToolStripItemAlignment.Right;
-        _twitchButton.ToolTipText = "Abre os chats da Twitch da conta, com o botão dos pontos e o baú, para resgatar na mão " +
-                                    "(300 pontos = 1 h de +15% de XP)";
+        _twitchButton.ToolTipText = Theme.Wrap("Abre os chats da Twitch da conta, com o botão dos pontos e o baú, para resgatar na mão " +
+                                               "(300 pontos = 1 h de +15% de XP)");
         _twitchButton.DropDownOpening += (_, _) => FillPointsMenu(LiveSite.Twitch);
         _twitchButton.DropDownItems.Add("…");
         _sniperButton.Alignment = ToolStripItemAlignment.Right;
@@ -2660,6 +2660,15 @@ internal sealed class DeckForm : Form
                 && !_config.Twitch[0].Limited,
                 $"antes={twitchBefore} menu={string.Join("|", twitchMenuBefore)} fechou={twitchShut} botão={twitchShutState} " +
                 $"menu depois={string.Join("|", twitchMenuAfter)} ({twitchShutSummary}) voltou={twitchReopened}");
+
+            // A dica do botão lives tem limite: linhas de até 60 letras (sem isso ela cresce pela tela toda).
+            string livesTip = _panes[0].LivesTip;
+            var tipLines = livesTip.Split('\n');
+            string wrapped = Theme.Wrap(string.Join(" ", Enumerable.Repeat("palavra", 200)));
+            Check("botão lives: a dica quebra em linhas de até 60 letras e corta em 12",
+                livesTip.Contains("tftoddy") && tipLines.Length > 2 && tipLines.All(l => l.Length <= 60)
+                && wrapped.Split('\n').Length == 12 && wrapped.EndsWith("\n…") && wrapped.Split('\n').All(l => l.Length <= 60),
+                livesTip.Replace("\n", " ⏎ "));
 
             // As lives da Kick da conta dividem um processo (--process-per-site), e o jogo fica em outro.
             var liveProcesses = _env is null ? new List<CoreWebView2ProcessExtendedInfo>()
