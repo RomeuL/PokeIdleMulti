@@ -237,12 +237,12 @@ internal sealed class LivesWindow : Form
     /// <summary>
     /// Roda no player de cada live de <paramref name="site"/> aberta e carregada o script que <paramref name="script"/>
     /// monta para o canal dela, esperando a promessa dele acabar (o resgate dos pontos espera o site), e devolve o texto
-    /// que ele entrega, por canal ("" quando a página não respondeu).
+    /// que ele entrega, por canal ("" quando a página não respondeu). Com <paramref name="only"/>, só na live desse canal.
     /// </summary>
-    public async Task<List<(string Channel, string Result)>> EvalLivesAsync(LiveSite site, Func<string, string> script)
+    public async Task<List<(string Channel, string Result)>> EvalLivesAsync(LiveSite site, Func<string, string> script, string? only = null)
     {
         var results = new List<(string, string)>();
-        foreach (var page in _pages.Where(p => p.Site == site && p.Channel is not null && p.Loaded).ToList())
+        foreach (var page in _pages.Where(p => p.Site == site && p.Channel is not null && p.Loaded && (only is null || p.Channel == only)).ToList())
         {
             if (IsDisposed || page.Channel is not string channel || page.View.CoreWebView2 is not CoreWebView2 core)
                 continue;

@@ -28,7 +28,8 @@ internal sealed class PointsRedeemer
 
     /// <summary>
     /// O começo dos scripts da Twitch (dentro de "async a => {"): gql(query, variables) chama a API do site com o login
-    /// da conta (a.token, a.device, a.clientId, a.api); quando a Twitch desafia o pedido com a checagem anti-robô, pede o
+    /// da conta (a.token, a.device, a.clientId, a.api); no lugar da query pode ir o pedido inteiro (o das operações
+    /// salvas da Twitch, com operationName e o hash). Quando a Twitch desafia o pedido com a checagem anti-robô, pede o
     /// token dela de dentro da página e manda de novo. fail(resposta, resultado) diz o que deu errado.
     /// </summary>
     internal const string TwitchGql =
@@ -36,9 +37,10 @@ internal sealed class PointsRedeemer
         "  ...(a.device ? { 'X-Device-Id': a.device } : {}) };" +
         " let integrity = null;" +
         " const gql = async (query, variables) => {" +
+        "  const body = JSON.stringify(typeof query === 'string' ? { query, variables } : query);" +
         "  for (let i = 0; i < 2; i++) {" +
         "   const r = await fetch(a.api + '/gql', { method: 'POST', cache: 'no-cache'," +
-        "    headers: integrity ? { ...base, 'Client-Integrity': integrity } : base, body: JSON.stringify({ query, variables }) });" +
+        "    headers: integrity ? { ...base, 'Client-Integrity': integrity } : base, body });" +
         "   if (!r.ok) return { failed: 'erro ' + r.status };" +
         "   const j = await r.json();" +
         "   const challenged = !!j?.extensions?.challenge || (j?.errors || []).some(e => e?.extensions?.code === 'IntegrityCheckFailed');" +
@@ -72,6 +74,103 @@ internal sealed class PointsRedeemer
         public DateTime ClaimRetryAt { get; set; }
 
         public string Text { get; set; } = "";
+
+        /// <summary>O id do canal na Twitch (os avisos vêm por id).</summary>
+        public string? Id { get; set; }
+
+        /// <summary>Desde quando a live está aberta (a conferência de 2 em 2 min vê), e a última conferência.</summary>
+        public DateTime? OpenSince { get; set; }
+        public DateTime? CheckedAt { get; set; }
+
+        /// <summary>Os pontos que entraram na última hora (pelos avisos), e o último de assistir.</summary>
+        public List<(DateTime At, int Points)> Gains { get; } = new();
+        public DateTime? WatchedAt { get; set; }
+
+        /// <summary>Já avisou que a live aberta não está rendendo os pontos de assistir (volta com o próximo).</summary>
+        public bool QuietNoted { get; set; }
+    }
+
+    /// <summary>O id da conta na Twitch (a conferência lê; os avisos da conta usam).</summary>
+    public string? UserId { get; private set; }
+
+    /// <summary>Desde quando os avisos da Twitch estão chegando (null: desconectados), para saber se a live rende.</summary>
+    public DateTime? ListeningSince { get; set; }
+
+    /// <summary>Live aberta esse tempo sem nenhum ponto de assistir (com os avisos chegando) não está rendendo.</summary>
+    public TimeSpan QuietLimit { get; set; } = TimeSpan.FromMinutes(20);
+
+    /// <summary>O id do canal na Twitch (null: ainda não conferiu).</summary>
+    public string? IdOf(string channel) => _channels.TryGetValue(channel, out var c) ? c.Id : null;
+
+    /// <summary>O canal de um id da Twitch (null: não é de uma live conferida).</summary>
+    public string? ChannelOf(string id) => _channels.FirstOrDefault(c => c.Value.Id == id).Key;
+
+    // Os nomes dos motivos dos pontos nos avisos da Twitch.
+    private static string Reason(string code) => code switch
+    {
+        "WATCH_STREAK" => "da sequência de lives",
+        "RAID" => "da raid",
+        "CLAIM" => "do baú",
+        "WATCH" => "assistindo",
+        _ => $"({code})",
+    };
+
+    /// <summary>
+    /// Um aviso de pontos que entraram (<paramref name="reason"/>: WATCH, CLAIM, WATCH_STREAK, RAID…): conta para o
+    /// rendimento e atualiza o saldo. A sequência de lives, a raid e o que não for assistir nem baú vão para o
+    /// registro; devolve o aviso para o cabeçalho da conta nesses.
+    /// </summary>
+    public string? Earned(string channel, string reason, int points, int? balance)
+    {
+        if (!_channels.TryGetValue(channel, out var c))
+            _channels[channel] = c = new Channel();
+        var now = DateTime.Now;
+        c.Gains.Add((now, points));
+        c.Gains.RemoveAll(g => now - g.At > TimeSpan.FromHours(1));
+        if (reason == "WATCH")
+        {
+            c.WatchedAt = now;
+            c.QuietNoted = false;
+        }
+        if (balance is int b)
+            c.Points = b;
+        if (reason is "WATCH" or "CLAIM")
+            return null;
+        Log?.Invoke($"{channel}: ganhou +{points} {Reason(reason)}" + (balance is int saldo ? $" (saldo {saldo})" : ""));
+        return $"{Site}: +{points} {Reason(reason)} em {channel}";
+    }
+
+    /// <summary>
+    /// Desde quando a live está sem ponto de assistir: o último que veio, ou a live aberta com os avisos chegando (o
+    /// mais novo dos três). Null: sem os avisos, não dá para saber.
+    /// </summary>
+    private DateTime? QuietFrom(Channel c)
+    {
+        if (ListeningSince is not DateTime since || c.OpenSince is not DateTime open)
+            return null;
+        var from = since > open ? since : open;
+        return c.WatchedAt is DateTime watched && watched > from ? watched : from;
+    }
+
+    /// <summary>Não está rendendo: <see cref="QuietLimit"/> sem ponto de assistir, com a live aberta e os avisos chegando.</summary>
+    private bool Quiet(Channel c, DateTime now) => QuietFrom(c) is DateTime from && now - from >= QuietLimit;
+
+    /// <summary>
+    /// As lives abertas que acabaram de parar de render (uma vez por vez que param): vão para o registro, e o deck
+    /// avisa no cabeçalho da conta.
+    /// </summary>
+    public List<string> NewQuiet(IEnumerable<string> open)
+    {
+        var now = DateTime.Now;
+        var quiet = new List<string>();
+        foreach (var channel in open)
+            if (_channels.TryGetValue(channel, out var c) && !c.QuietNoted && Quiet(c, now))
+            {
+                c.QuietNoted = true;
+                quiet.Add(channel);
+                Log?.Invoke($"{channel}: a live está aberta há {QuietLimit.TotalMinutes:0} min sem os pontos de assistir");
+            }
+        return quiet;
     }
 
     /// <summary>Por que parou de resgatar nesta conta (null: resgatando).</summary>
@@ -91,8 +190,25 @@ internal sealed class PointsRedeemer
         _channels.Clear();
     }
 
-    /// <summary>O saldo do canal e o último resgate, para o menu Lives ("230/300 pontos, resgatou 14:05").</summary>
-    public string Text(string channel) => _channels.TryGetValue(channel, out var c) ? c.Text : "";
+    /// <summary>
+    /// O saldo do canal e o último resgate, para o menu Lives ("230/300 pontos, resgatou 14:05"), com o que entrou na
+    /// última hora pelos avisos ("+320/h") e se a live parou de render.
+    /// </summary>
+    public string Text(string channel)
+    {
+        if (!_channels.TryGetValue(channel, out var c))
+            return "";
+        var now = DateTime.Now;
+        int hour = c.Gains.Where(g => now - g.At <= TimeSpan.FromHours(1)).Sum(g => g.Points);
+        var parts = new List<string>();
+        if (c.Text.Length > 0)
+            parts.Add(c.Text);
+        if (hour > 0)
+            parts.Add($"+{hour}/h");
+        if (QuietFrom(c) is DateTime from && now - from >= QuietLimit)
+            parts.Add($"sem pontos de assistir há {(now - from).TotalMinutes:0} min");
+        return string.Join(", ", parts);
+    }
 
     // A partir desse saldo os pontos do último resgate voltaram (metade do custo: assistir dá 10 a cada 5 min, e o
     // baú da Twitch, 50 a cada ~15 min).
@@ -157,11 +273,13 @@ internal sealed class PointsRedeemer
     /// o cookie unique_id): lê o saldo, pega o baú de bônus se tiver um (<paramref name="claim"/>) e, com
     /// <paramref name="reward"/>, resgata 1 bônus se der. Quando a Twitch desafia o pedido com a checagem anti-robô
     /// (como no baú), pede o token dela de dentro do player, como o próprio site faz (o Kasada do player entra no
-    /// pedido), e manda de novo.
+    /// pedido), e manda de novo. Devolve também o id da conta e o do canal (os avisos da Twitch vêm por id).
+    /// <paramref name="spend"/> falso só lê e pega o baú (o baú que o aviso da Twitch disse que apareceu).
     /// </summary>
-    public string TwitchScript(string api, string channel, string token, string? device, KickReward? reward, bool claim)
+    public string TwitchScript(string api, string channel, string token, string? device, KickReward? reward, bool claim, bool spend = true)
     {
-        var (spend, refund) = Plan(channel);
+        var (canSpend, refund) = Plan(channel);
+        spend = spend && canSpend;
         _channels.TryGetValue(channel, out var c);
         claim = claim && (c is null || DateTime.Now >= c.ClaimRetryAt);
         var args = JsonSerializer.Serialize(new
@@ -170,14 +288,15 @@ internal sealed class PointsRedeemer
         });
         return "(async a => {" + TwitchGql +
                " try {" +
-               "  const j = await gql('query($login:String!){user(login:$login){id channel{self{communityPoints{balance availableClaim{id}}}' +" +
+               "  const j = await gql('query($login:String!){currentUser{id} user(login:$login){id channel{self{communityPoints{balance availableClaim{id}}}' +" +
                "   ' communityPointsSettings{customRewards{id title prompt cost isEnabled isPaused isInStock cooldownExpiresAt}}}}}', { login: a.channel });" +
                "  if (j?.failed) return { error: 'saldo: ' + j.failed };" +
                "  const user = j?.data?.user;" +
                "  if (!user?.channel) return { error: 'canal não encontrado' };" +
+               "  const ids = { me: j?.data?.currentUser?.id ?? null, channelId: user.id };" +
                "  const cp = user.channel.self?.communityPoints;" +
-               "  if (typeof cp?.balance !== 'number') return { error: 'saldo: sem os pontos na resposta (login da Twitch?)' };" +
-               "  let points = cp.balance; const out = { points };" +
+               "  if (typeof cp?.balance !== 'number') return { ...ids, error: 'saldo: sem os pontos na resposta (login da Twitch?)' };" +
+               "  let points = cp.balance; const out = { points, ...ids };" +
                "  if (a.claim && cp.availableClaim?.id) {" +
                "   const k = await gql('mutation($i:ClaimCommunityPointsInput!){claimCommunityPoints(input:$i){claim{id} currentPoints error{code}}}'," +
                "    { i: { channelID: user.id, claimID: cp.availableClaim.id } });" +
@@ -205,6 +324,39 @@ internal sealed class PointsRedeemer
                $"}})({args}).then(o => JSON.stringify(o))";
     }
 
+    // A operação salva da Twitch para entrar numa raid (a mesma que o site manda ao clicar em "Entrar na raid").
+    private const string JoinRaidHash = "c6a332a86d1087fbbb1a8623aa01bd1313d2386e7c63be60fdb2d1901f01a4ae";
+
+    /// <summary>
+    /// O script que entra na raid <paramref name="raidId"/> (avisada pela Twitch no canal da live aberta), com o login
+    /// da conta: quem acompanha a raid ganha pontos no canal. Devolve { joined } ou { error }.
+    /// </summary>
+    public static string TwitchRaidScript(string api, string token, string? device, string raidId) =>
+        TwitchAction(api, token, device, new { raid = raidId },
+            "  const r = await gql({ operationName: 'JoinRaid', variables: { input: { raidID: a.raid } }," +
+            $"   extensions: {{ persistedQuery: {{ version: 1, sha256Hash: '{JoinRaidHash}' }} }} }});" +
+            "  if (r && !r.failed && !r.errors) return { joined: true };" +
+            "  return { error: fail(r, null) };");
+
+    /// <summary>O script que pega o "momento" <paramref name="momentId"/> do canal (avisado pela Twitch). Devolve { claimed } ou { error }.</summary>
+    public static string TwitchMomentScript(string api, string token, string? device, string momentId) =>
+        TwitchAction(api, token, device, new { moment = momentId },
+            "  const r = await gql('mutation($i:ClaimCommunityMomentInput!){claimCommunityMoment(input:$i){moment{id}}}', { i: { momentID: a.moment } });" +
+            "  const p = r?.data?.claimCommunityMoment;" +
+            "  if (p && !r.errors) return { claimed: true };" +
+            "  return { error: fail(r, p) };");
+
+    private static string TwitchAction(string api, string token, string? device, object extra, string body)
+    {
+        var args = JsonSerializer.SerializeToNode(new { api, token, device, clientId = TwitchClientId })!.AsObject();
+        foreach (var (name, value) in JsonSerializer.SerializeToNode(extra)!.AsObject())
+            args[name] = value?.DeepClone();
+        return "(async a => {" + TwitchGql +
+               " try {" + body +
+               " } catch (e) { return { error: 'sem resposta da Twitch: ' + (e && e.message || e) }; }" +
+               "})(" + args.ToJsonString() + ").then(o => JSON.stringify(o))";
+    }
+
     /// <summary>
     /// Anota o que o script de um canal devolveu. Devolve o aviso para o cabeçalho da conta quando resgatou, quando
     /// o site recusou ou quando parou por causa dos pontos que voltaram.
@@ -213,6 +365,11 @@ internal sealed class PointsRedeemer
     {
         if (!_channels.TryGetValue(channel, out var c))
             _channels[channel] = c = new Channel();
+        // Conferida de novo depois de um tempo sem: a live abriu (de novo) agora.
+        var checkedNow = DateTime.Now;
+        if (c.CheckedAt is not DateTime last || checkedNow - last > TimeSpan.FromMinutes(5))
+            c.OpenSince = checkedNow;
+        c.CheckedAt = checkedNow;
         int? points = null, cost = null, status = null;
         string? error = null, title = null, refused = null, claimError = null;
         bool redeemed = false, paused = false, claimed = false;
@@ -230,6 +387,10 @@ internal sealed class PointsRedeemer
             redeemed = root.TryGetProperty("redeemed", out var r) && r.ValueKind == JsonValueKind.True;
             paused = root.TryGetProperty("paused", out var z) && z.ValueKind == JsonValueKind.True;
             claimed = root.TryGetProperty("claimed", out var b) && b.ValueKind == JsonValueKind.True;
+            if (root.TryGetProperty("me", out var me) && me.ValueKind == JsonValueKind.String)
+                UserId = me.GetString();
+            if (root.TryGetProperty("channelId", out var id) && id.ValueKind == JsonValueKind.String)
+                c.Id = id.GetString();
         }
         catch (JsonException)
         {

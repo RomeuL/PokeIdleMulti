@@ -510,9 +510,23 @@ internal sealed class DeckForm : Form
         else
         {
             using var doc = JsonDocument.Parse(e.Request.Content is null ? "{}" : new StreamReader(e.Request.Content).ReadToEnd());
-            string query = doc.RootElement.GetProperty("query").GetString() ?? "";
+            // As operações salvas da Twitch (a da raid) vêm sem a query, só com o nome.
+            string query = doc.RootElement.TryGetProperty("query", out var q) ? q.GetString() ?? ""
+                : doc.RootElement.TryGetProperty("operationName", out var op) ? op.GetString() ?? "" : "";
             var variables = doc.RootElement.GetProperty("variables");
-            if (query.Contains("claimCommunityPoints"))
+            if (query == "JoinRaid")
+            {
+                string raid = variables.GetProperty("input").GetProperty("raidID").GetString() ?? "";
+                _fakeTwitch.Add($"raid {raid} {Header("Authorization")}");
+                json = JsonSerializer.Serialize(new { data = new { joinRaid = new { raidID = raid } } });
+            }
+            else if (query.Contains("claimCommunityMoment"))
+            {
+                string moment = variables.GetProperty("i").GetProperty("momentID").GetString() ?? "";
+                _fakeTwitch.Add($"momento {moment} {Header("Authorization")}");
+                json = JsonSerializer.Serialize(new { data = new { claimCommunityMoment = new { moment = new { id = moment } } } });
+            }
+            else if (query.Contains("claimCommunityPoints"))
             {
                 string claim = variables.GetProperty("i").GetProperty("claimID").GetString() ?? "";
                 string channel = claim.Replace("bau-", "");
@@ -617,6 +631,7 @@ internal sealed class DeckForm : Form
         SaveConfig();
         for (int i = 0; i < Accounts; i++)
             CloseLives(i);
+        _fakePubSub?.Dispose();
         base.OnFormClosing(e);
     }
 
@@ -880,6 +895,9 @@ internal sealed class DeckForm : Form
                     : "Twitch: nenhuma live da lista no ar");
             if (_config.Twitch[index].Limited && _config.Twitch[index].SlotsOf(_config.TwitchLives) > 0)
                 parts.Add("Twitch fechadas no botão lives: " + ShutText(index, LiveSite.Twitch));
+            // Os avisos da Twitch (o websocket) fora do ar: o porquê (o login recusado para de vez; o resto tenta de novo).
+            if (_pubsub[index] is { Connected: false, Error: string pubsubError })
+                parts.Add("avisos da Twitch: " + pubsubError);
             if (twitchRedeem?.Stopped is string twitchStopped)
                 parts.Add("resgate da Twitch parado: " + twitchStopped);
             else if (twitchRedeem is { NoLogin: true } && window.TwitchChannels.Any())
@@ -1738,16 +1756,25 @@ internal sealed class DeckForm : Form
                 var reward = _config.RedeemTwitch[i];
                 bool claim = _config.ClaimTwitchBonus;
                 if ((reward is null && !claim) || _lives[i] is not LivesWindow window || !window.TwitchChannels.Any())
+                {
+                    StopPubSub(i);
                     continue;
+                }
                 var redeemer = _redeemTwitch[i];
                 var (token, device) = await ReadTwitchLoginAsync(i);
                 redeemer.NoLogin = token is null;
                 if (token is null)
+                {
+                    StopPubSub(i);
                     continue;
+                }
                 foreach (var (channel, result) in await window.EvalLivesAsync(LiveSite.Twitch,
                              c => redeemer.TwitchScript(TwitchApi, c, token, device, reward, claim)))
                     if (redeemer.Apply(channel, result) is string note)
                         _panes[i].Note(note);
+                UpdatePubSub(i, token);
+                foreach (var quiet in redeemer.NewQuiet(window.TwitchChannels))
+                    _panes[i].Note($"Twitch: {quiet} está aberta há {redeemer.QuietLimit.TotalMinutes:0} min sem os pontos de assistir");
             }
         }
         finally
@@ -1755,6 +1782,142 @@ internal sealed class DeckForm : Form
             _twitchPointsBusy = false;
         }
         UpdateBar();
+    }
+
+    // Os avisos da Twitch de cada conta (o websocket), e as raids e os momentos que cada uma já pegou.
+    private readonly TwitchPubSub?[] _pubsub = new TwitchPubSub?[Accounts];
+    private readonly HashSet<string>[] _twitchTaken = Enumerable.Range(0, Accounts).Select(_ => new HashSet<string>()).ToArray();
+
+    // O websocket de avisos do autoteste (em localhost), aberto na primeira vez que o deck pede.
+    private FakePubSub? _fakePubSub;
+
+    private string PubSubUrl => _selfTest ? (_fakePubSub ??= new FakePubSub()).Url : TwitchPubSub.TwitchUrl;
+
+    /// <summary>
+    /// Liga (ou mantém) os avisos da Twitch da conta, com o login dela, ouvindo a raid e o momento das lives da Twitch
+    /// abertas. O login mudou: conecta de novo com o novo.
+    /// </summary>
+    private void UpdatePubSub(int index, string token)
+    {
+        var redeemer = _redeemTwitch[index];
+        var open = _lives[index]?.TwitchChannels.ToList() ?? new List<string>();
+        if (redeemer.UserId is not string me || open.Count == 0)
+        {
+            StopPubSub(index);
+            return;
+        }
+        if (_pubsub[index] is TwitchPubSub current && (current.Token != token || current.UserId != me))
+            StopPubSub(index);
+        var pubsub = _pubsub[index] ??= new TwitchPubSub(PubSubUrl, token, me, notice => _ = OnTwitchNoticeAsync(index, notice));
+        pubsub.SetChannels(open.Select(redeemer.IdOf).OfType<string>());
+        redeemer.ListeningSince = pubsub.Connected ? pubsub.ConnectedAt : null;
+    }
+
+    private void StopPubSub(int index)
+    {
+        _pubsub[index]?.Dispose();
+        _pubsub[index] = null;
+        _redeemTwitch[index].ListeningSince = null;
+    }
+
+    /// <summary>
+    /// Um aviso da Twitch na conta: o baú apareceu (pega na hora, na live dele), pontos entraram (o rendimento e o
+    /// saldo; a sequência de lives e a raid vão para o registro), o canal aberto fez raid (entra nela) ou abriu um
+    /// momento (pega).
+    /// </summary>
+    private async Task OnTwitchNoticeAsync(int index, TwitchPubSub.Notice notice)
+    {
+        try
+        {
+            var redeemer = _redeemTwitch[index];
+            redeemer.ListeningSince = _pubsub[index] is { Connected: true } pubsub ? pubsub.ConnectedAt : null;
+            if (notice.ChannelId is not string id || redeemer.ChannelOf(id) is not string channel
+                || _lives[index] is not LivesWindow window || !window.TwitchChannels.Contains(channel))
+                return;
+            var message = notice.Message;
+            switch (notice.Topic, notice.Type)
+            {
+                case ("community-points-user-v1", "points-earned"):
+                {
+                    var data = message.GetProperty("data");
+                    var gain = data.GetProperty("point_gain");
+                    int? balance = data.TryGetProperty("balance", out var b) && b.TryGetProperty("balance", out var bv) && bv.TryGetInt32(out int bi) ? bi : null;
+                    if (redeemer.Earned(channel, gain.GetProperty("reason_code").GetString() ?? "", gain.GetProperty("total_points").GetInt32(), balance) is string note)
+                        _panes[index].Note(note);
+                    break;
+                }
+                case ("community-points-user-v1", "claim-available") when _config.ClaimTwitchBonus:
+                {
+                    var (token, device) = await ReadTwitchLoginAsync(index);
+                    if (token is null)
+                        return;
+                    var reward = _config.RedeemTwitch[index];
+                    foreach (var (live, result) in await window.EvalLivesAsync(LiveSite.Twitch,
+                                 ch => redeemer.TwitchScript(TwitchApi, ch, token, device, reward, claim: true, spend: false), channel))
+                        if (redeemer.Apply(live, result) is string note)
+                            _panes[index].Note(note);
+                    break;
+                }
+                case ("raid", "raid_update_v2"):
+                {
+                    var raid = message.GetProperty("raid");
+                    string raidId = raid.GetProperty("id").GetString() ?? "";
+                    string target = raid.TryGetProperty("target_login", out var t) ? t.GetString() ?? "?" : "?";
+                    // A Twitch repete o aviso enquanto a raid não sai: entra uma vez só.
+                    if (!_twitchTaken[index].Add("raid " + raidId))
+                        return;
+                    var (token, device) = await ReadTwitchLoginAsync(index);
+                    if (token is null)
+                        return;
+                    var result = (await window.EvalLivesAsync(LiveSite.Twitch, _ => PointsRedeemer.TwitchRaidScript(TwitchApi, token, device, raidId), channel))
+                        .Select(r => r.Result).FirstOrDefault() ?? "";
+                    string? error = TwitchActionError(result, "joined");
+                    _redeemLog.Add(_config.AccountNames[index], LiveSite.Twitch, error is null
+                        ? $"{channel}: entrou na raid (para {target})"
+                        : $"{channel}: a raid (para {target}) não passou ({error})");
+                    if (error is null)
+                        _panes[index].Note($"Twitch: entrei na raid de {channel}");
+                    break;
+                }
+                case ("community-moments-channel-v1", "active"):
+                {
+                    string momentId = message.GetProperty("data").GetProperty("moment_id").GetString() ?? "";
+                    if (!_twitchTaken[index].Add("momento " + momentId))
+                        return;
+                    var (token, device) = await ReadTwitchLoginAsync(index);
+                    if (token is null)
+                        return;
+                    var result = (await window.EvalLivesAsync(LiveSite.Twitch, _ => PointsRedeemer.TwitchMomentScript(TwitchApi, token, device, momentId), channel))
+                        .Select(r => r.Result).FirstOrDefault() ?? "";
+                    string? error = TwitchActionError(result, "claimed");
+                    _redeemLog.Add(_config.AccountNames[index], LiveSite.Twitch, error is null
+                        ? $"{channel}: pegou o momento"
+                        : $"{channel}: o momento não passou ({error})");
+                    break;
+                }
+            }
+            UpdateBar();
+        }
+        catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException or ObjectDisposedException)
+        {
+            // Aviso fora do formato, ou a janela fechou no meio: ignora esse.
+        }
+    }
+
+    /// <summary>O erro do script de uma ação da Twitch (raid, momento), ou null se deu certo (<paramref name="ok"/> veio true).</summary>
+    private static string? TwitchActionError(string json, string ok)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.TryGetProperty(ok, out var done) && done.ValueKind == JsonValueKind.True)
+                return null;
+            return doc.RootElement.TryGetProperty("error", out var error) ? error.GetString() : "sem resposta";
+        }
+        catch (JsonException)
+        {
+            return "a live não respondeu";
+        }
     }
 
     /// <summary>O login da Kick salvo no perfil da conta: o cookie session_token, que o site manda como "Bearer".</summary>
@@ -1839,6 +2002,7 @@ internal sealed class DeckForm : Form
 
     private void CloseLives(int index)
     {
+        StopPubSub(index);
         _twitchLogin[index] = null;
         if (_lives[index] is LivesWindow window)
         {
@@ -3026,6 +3190,69 @@ internal sealed class DeckForm : Form
                 && _fakeTwitchPoints["biscoitao"] == 0 && _fakePoints["biscoitao"] == 0 && ownerLogs && bulk?.IsDisposed == true,
                 $"{ownerTwitch.Replace(Environment.NewLine, " ")} | {ownerTwitchEnd} | {ownerKick.Replace(Environment.NewLine, " ")} | {ownerKickEnd} | " +
                 $"twitch={ownerTwitchRedeems} kick={ownerKickRedeems} | {string.Join(" | ", ownerLog.TakeLast(8))}");
+
+            // Avisos da Twitch (o websocket da conta; o de mentira, em localhost): a conferência liga com o login da conta
+            // e ouve os pontos da conta e a raid e o momento da live aberta. O baú que aparece é pego na hora; a
+            // sequência de lives vai para o registro e para o rendimento (+450/h); a raid avisada duas vezes é uma entrada
+            // só; o momento é pego. Live aberta sem ponto de assistir avisa, e o próximo ponto de assistir tira o aviso.
+            _redeemTwitch[0].Restart();
+            _fakeTwitchPoints["tftoddy"] = 100;
+            await TwitchPointsAsync();
+            var fakePubSub = _fakePubSub;
+            const string userTopic = "community-points-user-v1.id-fulano_twitch";
+            bool listening = fakePubSub is not null && await WaitFor(() => fakePubSub.Listening(userTopic)
+                && fakePubSub.Listening("raid.id-tftoddy") && fakePubSub.Listening("community-moments-channel-v1.id-tftoddy"), 15);
+            bool withLogin = fakePubSub?.Listens.Contains($"{userTopic} tok123") == true;
+            bool claimedNow = false, streak = false, raided = false, moment = false, quietShown = false, quietGone = false, badAuth = false;
+            string earnedSummary = "", quietSummary = "";
+            if (fakePubSub is not null && listening)
+            {
+                static string Stamp() => DateTime.UtcNow.ToString("o");
+                object Earn(int points, string reason, int balance) => new
+                {
+                    type = "points-earned",
+                    data = new
+                    {
+                        timestamp = Stamp(), channel_id = "id-tftoddy",
+                        point_gain = new { channel_id = "id-tftoddy", total_points = points, reason_code = reason },
+                        balance = new { channel_id = "id-tftoddy", balance },
+                    },
+                };
+                _fakeTwitchClaims.Add("tftoddy");
+                _fakeTwitch.Clear();
+                await fakePubSub.SendAsync(userTopic, new { type = "claim-available", data = new { timestamp = Stamp(), claim = new { id = "bau-tftoddy", channel_id = "id-tftoddy" } } });
+                claimedNow = await WaitFor(() => _fakeTwitch.Contains("baú bau-tftoddy OAuth tok123"), 15);
+                await fakePubSub.SendAsync(userTopic, Earn(450, "WATCH_STREAK", 600));
+                streak = await WaitFor(() => _redeemLog.Lines.Any(l => l.EndsWith($"  {account1} · Twitch · tftoddy: ganhou +450 da sequência de lives (saldo 600)")), 10);
+                earnedSummary = LivesSummary(0);
+                var raidNotice = new { type = "raid_update_v2", raid = new { id = "raid1", target_login = "outro" } };
+                await fakePubSub.SendAsync("raid.id-tftoddy", raidNotice);
+                await fakePubSub.SendAsync("raid.id-tftoddy", raidNotice);
+                raided = await WaitFor(() => _redeemLog.Lines.Any(l => l.EndsWith($"  {account1} · Twitch · tftoddy: entrou na raid (para outro)")), 10);
+                await Task.Delay(500);
+                raided = raided && _fakeTwitch.Count(l => l == "raid raid1 OAuth tok123") == 1;
+                await fakePubSub.SendAsync("community-moments-channel-v1.id-tftoddy", new { type = "active", data = new { moment_id = "m1" } });
+                moment = await WaitFor(() => _fakeTwitch.Contains("momento m1 OAuth tok123")
+                                             && _redeemLog.Lines.Any(l => l.EndsWith($"  {account1} · Twitch · tftoddy: pegou o momento")), 10);
+                _redeemTwitch[0].QuietLimit = TimeSpan.FromSeconds(3);
+                await Task.Delay(3500);
+                await TwitchPointsAsync();
+                quietSummary = LivesSummary(0);
+                quietShown = quietSummary.Contains("sem pontos de assistir há")
+                             && _redeemLog.Lines.Any(l => l.EndsWith($"  {account1} · Twitch · tftoddy: a live está aberta há 0 min sem os pontos de assistir"));
+                await fakePubSub.SendAsync(userTopic, Earn(10, "WATCH", 610));
+                quietGone = await WaitFor(() => !LivesSummary(0).Contains("sem pontos de assistir") && LivesSummary(0).Contains("+460/h"), 2);
+                _redeemTwitch[0].QuietLimit = TimeSpan.FromMinutes(20);
+                // O login recusado (ERR_BADAUTH) para de vez e diz o porquê.
+                using var refused = new TwitchPubSub(fakePubSub.Url, "recusado", "id-x", _ => { });
+                badAuth = await WaitFor(() => refused.Error == "a Twitch recusou o login da conta nos avisos" && !refused.Connected, 10);
+            }
+            Check("avisos da Twitch: o baú na hora, a sequência de lives e o rendimento, a raid (uma vez) e o momento; live sem render avisa",
+                listening && withLogin && claimedNow && streak && earnedSummary.Contains("+450/h") && raided && moment && quietShown && quietGone
+                && badAuth,
+                $"ouvindo={listening} login={withLogin} baú={claimedNow} sequência={streak} raid={raided} momento={moment} recusado={badAuth} " +
+                $"sem render={quietShown}/{quietGone} | {earnedSummary} | {quietSummary} | pedidos={string.Join(" | ", _fakeTwitch)} | " +
+                $"tópicos={string.Join(", ", fakePubSub?.Listens ?? new List<string>())}");
 
             // deck.json: o de antes (um resgate para todas as contas) vira o mesmo bônus em cada conta; um número fora
             // da lista vira o XP; de fábrica nenhuma conta resgata.
