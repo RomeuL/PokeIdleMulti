@@ -883,8 +883,11 @@ internal sealed class DeckForm : Form
             var redeem = _config.RedeemKick[index] is not null ? _redeemKick[index] : null;
             // Na Twitch o saldo aparece também só com o baú ligado.
             var twitchRedeem = _config.RedeemTwitch[index] is not null || _config.ClaimTwitchBonus ? _redeemTwitch[index] : null;
+            // Na Twitch leve, no lugar do ▶: se a Twitch está aceitando o "assistindo" do deck ("leve ✓ 14:05").
+            var watcher = _watchers[index];
             IEnumerable<string> Played(LiveSite site) => window.Playback(site).Select(k => k.Channel
                 + (k.Playing == true ? " ▶" : k.Playing == false ? " ‖" : "") + (k.Reloads > 0 ? $" ⟳{k.Reloads}" : "")
+                + (site == LiveSite.Twitch && watcher?.Status(k.Channel) is { Length: > 0 } light ? " " + light : "")
                 + ((site == LiveSite.Kick ? redeem : twitchRedeem)?.Text(k.Channel) is { Length: > 0 } points ? $" ({points})" : ""));
             if (_config.TwitchChannels.Count > 0 && _config.TwitchLives > 0)
                 parts.Add(_twitchLogin[index] == false ? "Twitch: entre na Twitch (Lives → Mostrar)"
@@ -946,7 +949,7 @@ internal sealed class DeckForm : Form
             && Enumerable.Range(0, Accounts).Any(i => _config.RedeemKick[i] is not null && _lives[i] is not null))
             _ = RedeemKickAsync();
         if (!_selfTest && !_twitchPointsBusy && DateTime.Now >= _twitchPointsAt
-            && Enumerable.Range(0, Accounts).Any(i => (_config.RedeemTwitch[i] is not null || _config.ClaimTwitchBonus)
+            && Enumerable.Range(0, Accounts).Any(i => (_config.RedeemTwitch[i] is not null || _config.ClaimTwitchBonus || _config.TwitchLight[i])
                                                      && _lives[i]?.TwitchChannels.Any() == true))
             _ = TwitchPointsAsync();
         UpdateVotes();
@@ -1593,6 +1596,10 @@ internal sealed class DeckForm : Form
         ? $"https://twitch.test/twitch.html?canal={Uri.EscapeDataString(channel)}"
         : TwitchLive.PlayerUrl(channel);
 
+    // A live da Twitch da conta: na Twitch leve, o player parado (sem vídeo); quem assiste é o deck (TwitchWatcher).
+    private string TwitchLiveUrl(int index, string channel) =>
+        _config.TwitchLight[index] ? TwitchUrl(channel) + "&" + TwitchLive.Still : TwitchUrl(channel);
+
     // A live da Kick toca só o player: ele avisa a Kick que a conta está assistindo, como a página do canal
     // (testado: os pontos sobem igual), gastando uns 40% menos. A página do canal só abre para o chat e os
     // pontos, com a janela das lives na tela.
@@ -1755,9 +1762,11 @@ internal sealed class DeckForm : Form
             {
                 var reward = _config.RedeemTwitch[i];
                 bool claim = _config.ClaimTwitchBonus;
-                if ((reward is null && !claim) || _lives[i] is not LivesWindow window || !window.TwitchChannels.Any())
+                // Na Twitch leve a conferência roda mesmo sem baú nem resgate: ela dá o id da conta para o deck assistir.
+                if ((reward is null && !claim && !_config.TwitchLight[i]) || _lives[i] is not LivesWindow window || !window.TwitchChannels.Any())
                 {
                     StopPubSub(i);
+                    StopWatcher(i);
                     continue;
                 }
                 var redeemer = _redeemTwitch[i];
@@ -1766,6 +1775,7 @@ internal sealed class DeckForm : Form
                 if (token is null)
                 {
                     StopPubSub(i);
+                    StopWatcher(i);
                     continue;
                 }
                 foreach (var (channel, result) in await window.EvalLivesAsync(LiveSite.Twitch,
@@ -1773,6 +1783,7 @@ internal sealed class DeckForm : Form
                     if (redeemer.Apply(channel, result) is string note)
                         _panes[i].Note(note);
                 UpdatePubSub(i, token);
+                UpdateWatcher(i, token, device);
                 foreach (var quiet in redeemer.NewQuiet(window.TwitchChannels))
                     _panes[i].Note($"Twitch: {quiet} está aberta há {redeemer.QuietLimit.TotalMinutes:0} min sem os pontos de assistir");
             }
@@ -1818,6 +1829,51 @@ internal sealed class DeckForm : Form
         _pubsub[index]?.Dispose();
         _pubsub[index] = null;
         _redeemTwitch[index].ListeningSince = null;
+    }
+
+    // Quem assiste às lives da Twitch sem player, em cada conta com a Twitch leve.
+    private readonly TwitchWatcher?[] _watchers = new TwitchWatcher?[Accounts];
+
+    // No autoteste, a Twitch de fora do navegador é a de mentira (o mesmo servidor do websocket, em localhost).
+    private TwitchWatcher.Endpoints WatcherEndpoints => _selfTest
+        ? new TwitchWatcher.Endpoints((_fakePubSub ??= new FakePubSub()).WebUrl, _fakePubSub.WebUrl + "/gql", _fakePubSub.WebUrl + "/usher")
+        : TwitchWatcher.Twitch;
+
+    /// <summary>
+    /// Na Twitch leve, liga (ou mantém) quem assiste às lives da Twitch abertas na conta, sem player, com o login e o id
+    /// dela; fora dela, ou sem o id da conta ainda, desliga. O login mudou: começa de novo com o novo.
+    /// </summary>
+    private void UpdateWatcher(int index, string token, string? device)
+    {
+        var open = _lives[index]?.TwitchChannels.ToList() ?? new List<string>();
+        if (!_config.TwitchLight[index] || _redeemTwitch[index].UserId is not string me || open.Count == 0)
+        {
+            StopWatcher(index);
+            return;
+        }
+        if (_watchers[index] is TwitchWatcher current && (current.Token != token || current.UserId != me))
+            StopWatcher(index);
+        var watcher = _watchers[index] ??= NewWatcher(index, me, token, device);
+        watcher.SetChannels(open);
+    }
+
+    /// <summary>Quem assiste na Twitch leve (o autoteste encurta os tempos).</summary>
+    private TwitchWatcher NewWatcher(int index, string userId, string token, string? device)
+    {
+        var watcher = new TwitchWatcher(WatcherEndpoints, userId, token, device);
+        if (_selfTest)
+        {
+            watcher.Tick = TimeSpan.FromMilliseconds(300);
+            watcher.MinuteEvery = TimeSpan.FromSeconds(1);
+            watcher.PlaylistEvery = TimeSpan.FromSeconds(1);
+        }
+        return watcher;
+    }
+
+    private void StopWatcher(int index)
+    {
+        _watchers[index]?.Dispose();
+        _watchers[index] = null;
     }
 
     /// <summary>
@@ -1952,7 +2008,7 @@ internal sealed class DeckForm : Form
                 var twitch = _config.Twitch[i];
                 var open = _config.TwitchChannels.Where(c => !twitch.Closed.Contains(c));
                 window.SetLives(LiveSite.Twitch, _twitchLogin[i] == false ? new()
-                    : KickLive.Pick(open, _twitchLive, twitch.SlotsOf(_config.TwitchLives)).Select(c => (c, TwitchUrl(c))).ToList());
+                    : KickLive.Pick(open, _twitchLive, twitch.SlotsOf(_config.TwitchLives)).Select(c => (c, TwitchLiveUrl(i, c))).ToList());
             }
             if (_selfTest || _kickLive.Count > 0)
             {
@@ -2003,6 +2059,7 @@ internal sealed class DeckForm : Form
     private void CloseLives(int index)
     {
         StopPubSub(index);
+        StopWatcher(index);
         _twitchLogin[index] = null;
         if (_lives[index] is LivesWindow window)
         {
@@ -2171,7 +2228,7 @@ internal sealed class DeckForm : Form
     private async Task EditChannelsAsync()
     {
         using var dialog = new ChannelsDialog(_config.TwitchChannels, _config.KickChannels, _config.TwitchLives, _config.KickLives,
-            _config.AccountNames, _config.RedeemKick, _config.RedeemTwitch, _config.ClaimTwitchBonus);
+            _config.AccountNames, _config.RedeemKick, _config.RedeemTwitch, _config.ClaimTwitchBonus, _config.TwitchLight);
         if (dialog.ShowDialog(this) != DialogResult.OK)
             return;
         _config.TwitchChannels = dialog.TwitchChannels;
@@ -2184,6 +2241,7 @@ internal sealed class DeckForm : Form
         _config.RedeemKick = dialog.RedeemKick;
         _config.RedeemTwitch = dialog.RedeemTwitch;
         _config.ClaimTwitchBonus = dialog.ClaimTwitchBonus;
+        _config.TwitchLight = dialog.TwitchLight;
         foreach (var redeemer in _redeemKick.Concat(_redeemTwitch))
             redeemer.Restart();
         SaveConfig();
@@ -3253,6 +3311,43 @@ internal sealed class DeckForm : Form
                 $"ouvindo={listening} login={withLogin} baú={claimedNow} sequência={streak} raid={raided} momento={moment} recusado={badAuth} " +
                 $"sem render={quietShown}/{quietGone} | {earnedSummary} | {quietSummary} | pedidos={string.Join(" | ", _fakeTwitch)} | " +
                 $"tópicos={string.Join(", ", fakePubSub?.Listens ?? new List<string>())}");
+
+            // Twitch leve (Lives → Config…, por conta): a live da Twitch da conta 1 abre parada (sem vídeo; o deck não manda
+            // tocar nem recarrega), e quem assiste é o deck, sem navegador: o aviso de "assistindo" (no endereço tirado da
+            // config da página, com o id da conta, o do canal e o da transmissão) e só o cabeçalho dos pedaços do vídeo na
+            // menor qualidade, com o token do vídeo pedido com o login da conta. Desligar volta o player e para o deck.
+            _config.TwitchLight[0] = true;
+            ApplyLives();
+            var lightLives = _lives[0];
+            bool still = await WaitFor(() => lightLives is not null && lightLives.Loaded == lightLives.Count
+                && lightLives.Urls(LiveSite.Twitch).Any(u => u.EndsWith("&" + TwitchLive.Still)), 15);
+            await TwitchPointsAsync();
+            bool watched = await WaitFor(() => _watchers[0]?.Counts("tftoddy") is ( >= 2, >= 3), 20);
+            if (lightLives is not null)
+                for (int i = 0; i < 3; i++)
+                    await lightLives.WatchAsync();
+            bool notForced = lightLives?.Playback(LiveSite.Twitch).All(p => p.Playing is null && p.Reloads == 0) == true;
+            var webLog = _fakePubSub?.Web ?? new List<string>();
+            string spade = webLog.FirstOrDefault(l => l.StartsWith("spade ")) ?? "";
+            bool payload = spade.Contains("\"event\":\"minute-watched\"") && spade.Contains("\"channel_id\":\"id-tftoddy\"")
+                && spade.Contains("\"broadcast_id\":\"b-tftoddy\"") && spade.Contains("\"user_id\":\"id-fulano_twitch\"")
+                && spade.Contains("\"channel\":\"tftoddy\"") && spade.Contains("\"player\":\"site\"") && spade.Contains("\"live\":true")
+                && spade.Contains("\"game_id\":\"g1\"");
+            bool fromPage = webLog.Contains("página tftoddy");
+            bool tokenWithLogin = webLog.Contains("token tftoddy OAuth tok123") && webLog.Contains("usher tftoddy sig=sig1");
+            bool lowest = webLog.Contains("lista tftoddy 160p") && !webLog.Any(l => l.StartsWith("lista tftoddy 720p") || l.StartsWith("lista tftoddy audio"));
+            bool headOnly = webLog.Any(l => l.StartsWith("HEAD /seg/tftoddy/")) && !webLog.Any(l => l.StartsWith("GET /seg/"));
+            string lightSummary = LivesSummary(0);
+            _config.TwitchLight[0] = false;
+            ApplyLives();
+            await TwitchPointsAsync();
+            bool lightBack = await WaitFor(() => lightLives is not null && lightLives.Loaded == lightLives.Count && _watchers[0] is null
+                && lightLives.Urls(LiveSite.Twitch).Any() && lightLives.Urls(LiveSite.Twitch).All(u => !u.Contains(TwitchLive.Still)), 15);
+            Check("Twitch leve: o player abre parado e o deck assiste sem navegador (o aviso de assistindo e só o cabeçalho do vídeo); desligar volta o player",
+                still && watched && notForced && payload && fromPage && tokenWithLogin && lowest && headOnly && lightSummary.Contains("tftoddy leve ✓") && lightBack,
+                $"parado={still} assistiu={watched} ({_watchers[0]?.Counts("tftoddy")}) sem forçar={notForced} aviso={payload} config={fromPage} " +
+                $"token={tokenWithLogin} menor={lowest} só cabeçalho={headOnly} voltou={lightBack} | {lightSummary} | {spade} | " +
+                string.Join(" | ", webLog.Where(l => !l.StartsWith("HEAD ") && !l.StartsWith("spade ")).Distinct().Take(12)));
 
             // deck.json: o de antes (um resgate para todas as contas) vira o mesmo bônus em cada conta; um número fora
             // da lista vira o XP; de fábrica nenhuma conta resgata.

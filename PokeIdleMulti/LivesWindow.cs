@@ -179,6 +179,9 @@ internal sealed class LivesWindow : Form
 
     public IEnumerable<(string Channel, bool? Playing, int Reloads)> KickPlayback => Playback(LiveSite.Kick);
 
+    /// <summary>O endereço de cada live de <paramref name="site"/> aberta (para o autoteste).</summary>
+    public IEnumerable<string> Urls(LiveSite site) => _pages.Where(p => p.Site == site && p.Url is not null).Select(p => p.Url!);
+
     /// <summary>
     /// Confere se o vídeo de cada live aberta está andando, que é o que rende os pontos. Pausado: manda
     /// tocar. Parado em duas conferências seguidas (travou, a live caiu e voltou, a página não carregou por
@@ -193,6 +196,13 @@ internal sealed class LivesWindow : Form
             // A conta pode ter sido desligada (e a janela fechada) no meio da conferência.
             if (IsDisposed)
                 return;
+            // O player parado da Twitch leve não toca: quem assiste é o deck (TwitchWatcher).
+            if (page.Url?.Contains(TwitchLive.Still) == true)
+            {
+                page.Playing = null;
+                page.Stalls = 0;
+                continue;
+            }
             // "pausado prontidão tempo": andando = não pausado e o tempo passou desde a última conferência.
             var parts = (page.Loaded ? await PlaybackAsync(page) : "carregando").Split(' ');
             bool moving = false;
@@ -308,9 +318,10 @@ internal sealed class LivesWindow : Form
     {
         var slots = _pages.Where(p => p.Site == site).ToList();
         var wanted = lives.Take(slots.Count).ToList();
-        foreach (var slot in slots.Where(s => s.Channel is not null && !wanted.Any(w => w.Channel == s.Channel)))
+        // A mesma live com outro endereço (a Twitch leve ligada ou desligada) abre de novo.
+        foreach (var slot in slots.Where(s => s.Channel is not null && !wanted.Any(w => w.Channel == s.Channel && w.Url == s.Url)))
             Navigate(slot, null, null);
-        foreach (var (channel, url) in wanted.Where(w => !slots.Any(s => s.Channel == w.Channel)))
+        foreach (var (channel, url) in wanted.Where(w => !slots.Any(s => s.Channel == w.Channel && s.Url == w.Url)))
             Navigate(slots.First(s => s.Channel is null), url, channel);
         Arrange();
         Fit();

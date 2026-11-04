@@ -29,6 +29,12 @@ internal static class TwitchLive
     public static string PlayerUrl(string channel) =>
         $"https://player.twitch.tv/?channel={Uri.EscapeDataString(channel)}&parent=twitch.tv&player=popout";
 
+    /// <summary>
+    /// O que vai no endereço do player na Twitch leve: ele abre parado, sem o vídeo (fica só para o baú e o resgate, que
+    /// precisam da página por causa da checagem anti-robô); quem assiste é o deck (<see cref="TwitchWatcher"/>).
+    /// </summary>
+    public const string Still = "autoplay=false";
+
     /// <summary>Cada canal: true = no ar, false = offline ou não existe, null = não deu para saber agora.</summary>
     public static async Task<Dictionary<string, bool?>> LiveAsync(IReadOnlyList<string> channels)
     {

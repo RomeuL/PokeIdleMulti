@@ -87,6 +87,12 @@ internal sealed class DeckConfig
     public bool ClaimTwitchBonus { get; set; } = true;
 
     /// <summary>
+    /// A Twitch leve em cada conta (Lives → Config…): o player das lives da Twitch abre parado, sem vídeo, e quem assiste
+    /// é o deck, sem navegador (<see cref="TwitchWatcher"/>). De fábrica desligada.
+    /// </summary>
+    public bool[] TwitchLight { get; set; } = new bool[Accounts];
+
+    /// <summary>
     /// Streamers oficiais na Kick, em ordem de prioridade. Abre a live inteira, que é o que rende pontos
     /// do canal, mas só das primeiras que estiverem no ar, até <see cref="KickLives"/> (<see cref="KickLive"/>).
     /// </summary>
@@ -150,6 +156,7 @@ internal sealed class DeckConfig
         config.Zoom = Fill(config.Zoom, _ => 1.0);
         config.Muted = Fill(config.Muted, _ => false);
         config.Off = Fill(config.Off, _ => false);
+        config.TwitchLight = Fill(config.TwitchLight, _ => false);
         config.Kick = Fill(config.Kick, _ => new LiveLimit())
             .Select(k => k is { Closed: not null } ? k : new LiveLimit()).ToArray();
         config.KickLives = Math.Clamp(config.KickLives, 0, KickLive.MaxSlots);

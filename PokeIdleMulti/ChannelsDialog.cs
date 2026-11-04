@@ -7,7 +7,7 @@ internal sealed class ChannelsDialog : Form
     private readonly TextBox _kick = NewList();
     private readonly NumericUpDown _twitchLives = new() { Minimum = 0, Maximum = TwitchLive.MaxSlots, Width = 60 };
     private readonly NumericUpDown _kickLives = new() { Minimum = 0, Maximum = KickLive.MaxSlots, Width = 60 };
-    private readonly List<(ComboBox Kick, ComboBox Twitch)> _redeem = new();
+    private readonly List<(ComboBox Kick, ComboBox Twitch, CheckBox Light)> _redeem = new();
     private readonly CheckBox _claim = new()
     {
         Text = "Pegar sozinho o baú de bônus da Twitch (+50 pontos a cada ~15 min)",
@@ -21,10 +21,11 @@ internal sealed class ChannelsDialog : Form
     /// <summary>
     /// <paramref name="accounts"/>, <paramref name="redeemKick"/> e <paramref name="redeemTwitch"/>: o nome de cada conta e o
     /// bônus que ela resgata sozinha com os pontos da Kick e da Twitch (null: não resgata). <paramref name="claimTwitch"/>:
-    /// pegar o baú de bônus da Twitch.
+    /// pegar o baú de bônus da Twitch. <paramref name="twitchLight"/>: a Twitch leve (sem vídeo) de cada conta.
     /// </summary>
     public ChannelsDialog(IEnumerable<string> twitch, IEnumerable<string> kick, int twitchLives, int kickLives,
-        IReadOnlyList<string> accounts, IReadOnlyList<KickReward?> redeemKick, IReadOnlyList<KickReward?> redeemTwitch, bool claimTwitch)
+        IReadOnlyList<string> accounts, IReadOnlyList<KickReward?> redeemKick, IReadOnlyList<KickReward?> redeemTwitch, bool claimTwitch,
+        IReadOnlyList<bool>? twitchLight = null)
     {
         Text = "Config das lives";
         Icon = Theme.AppIcon;
@@ -33,7 +34,7 @@ internal sealed class ChannelsDialog : Form
         StartPosition = FormStartPosition.CenterScreen;
         AutoScaleDimensions = new SizeF(96F, 96F);
         AutoScaleMode = AutoScaleMode.Dpi;
-        ClientSize = new Size(540, 700);
+        ClientSize = new Size(640, 700);
         Padding = new Padding(12);
 
         _twitch.Text = string.Join(Environment.NewLine, twitch);
@@ -50,21 +51,30 @@ internal sealed class ChannelsDialog : Form
         lives.Controls.Add(new Label { Text = "(de fábrica 2; 0 = nenhuma)", AutoSize = true, Margin = new Padding(4, 7, 0, 0) });
 
         // Uma linha por conta: o bônus que ela resgata sozinha em cada site.
-        var redeemRows = new TableLayoutPanel { Dock = DockStyle.Bottom, ColumnCount = 3, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink };
+        var redeemRows = new TableLayoutPanel { Dock = DockStyle.Bottom, ColumnCount = 4, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink };
         redeemRows.Controls.Add(new Label { Text = "Resgatar sozinho:", AutoSize = true, Margin = new Padding(0, 6, 0, 2) }, 0, 0);
         redeemRows.Controls.Add(new Label { Text = "com os pontos da Kick", AutoSize = true, Margin = new Padding(3, 6, 0, 2) }, 1, 0);
         redeemRows.Controls.Add(new Label { Text = "com os pontos da Twitch", AutoSize = true, Margin = new Padding(3, 6, 0, 2) }, 2, 0);
+        var lightHeader = new Label { Text = "Twitch leve", AutoSize = true, Margin = new Padding(3, 6, 0, 2) };
+        redeemRows.Controls.Add(lightHeader, 3, 0);
+        const string lightTip = "Twitch leve: o player da Twitch abre parado, sem vídeo (fica só para o baú e o resgate), e quem assiste é " +
+                                "o deck, sem navegador, como os mineradores de pontos. Gasta quase nada. Os pontos que entram aparecem no " +
+                                "menu Lives (+N/h); sem os de assistir em 20 min, o deck avisa";
+        _tips.SetToolTip(lightHeader, lightTip);
         for (int i = 0; i < accounts.Count; i++)
         {
             var name = new Label { Text = accounts[i], AutoSize = false, Width = 130, Height = 23, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft };
             var kickCombo = NewReward(i < redeemKick.Count ? redeemKick[i] : null);
             var twitchCombo = NewReward(i < redeemTwitch.Count ? redeemTwitch[i] : null);
+            var light = new CheckBox { AutoSize = true, Margin = new Padding(24, 5, 0, 0), Checked = twitchLight is not null && i < twitchLight.Count && twitchLight[i] };
             _tips.SetToolTip(kickCombo, "Sem a Kick vinculada no jogo (Bônus na Kick) os pontos voltam: o deck para de resgatar nesta conta e avisa no menu Lives");
             _tips.SetToolTip(twitchCombo, "Sem a Twitch vinculada no jogo (Bônus Twitch) os pontos voltam: o deck para de resgatar nesta conta e avisa no menu Lives");
+            _tips.SetToolTip(light, lightTip);
             redeemRows.Controls.Add(name, 0, i + 1);
             redeemRows.Controls.Add(kickCombo, 1, i + 1);
             redeemRows.Controls.Add(twitchCombo, 2, i + 1);
-            _redeem.Add((kickCombo, twitchCombo));
+            redeemRows.Controls.Add(light, 3, i + 1);
+            _redeem.Add((kickCombo, twitchCombo, light));
         }
         var redeemHint = new Label
         {
@@ -126,6 +136,9 @@ internal sealed class ChannelsDialog : Form
     public KickReward?[] RedeemTwitch => _redeem.Select(r => Chosen(r.Twitch)).ToArray();
 
     public bool ClaimTwitchBonus => _claim.Checked;
+
+    /// <summary>A Twitch leve (sem vídeo) de cada conta.</summary>
+    public bool[] TwitchLight => _redeem.Select(r => r.Light.Checked).ToArray();
 
     protected override void Dispose(bool disposing)
     {

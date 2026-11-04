@@ -7,14 +7,18 @@ using System.Text.Json;
 namespace PokeIdleMulti;
 
 /// <summary>
-/// O websocket de avisos da Twitch do autoteste, em localhost: anota cada tópico que o deck pede (com o login), responde
-/// o PING e manda os avisos que o autoteste quiser (o baú, os pontos, a raid, o momento).
+/// A Twitch de fora do navegador do autoteste, em localhost. O websocket de avisos: anota cada tópico que o deck pede
+/// (com o login), responde o PING e manda os avisos que o autoteste quiser (o baú, os pontos, a raid, o momento). E a
+/// parte web que a Twitch leve usa: a página do canal (com a config), o aviso de "assistindo", a API (a live e o token
+/// do vídeo) e as listas e os pedaços do vídeo. Cada pedido vai para <see cref="Web"/>.
 /// </summary>
 internal sealed class FakePubSub : IDisposable
 {
     private readonly HttpListener _http = new();
     private readonly List<(WebSocket Socket, HashSet<string> Topics)> _clients = new();
     private readonly List<string> _listens = new();
+    private readonly List<string> _web = new();
+    private readonly Dictionary<string, int> _sequence = new();
 
     public FakePubSub()
     {
@@ -25,10 +29,27 @@ internal sealed class FakePubSub : IDisposable
         _http.Prefixes.Add($"http://localhost:{port}/");
         _http.Start();
         Url = $"ws://localhost:{port}/";
+        WebUrl = $"http://localhost:{port}";
         _ = AcceptAsync();
     }
 
     public string Url { get; }
+
+    /// <summary>A parte web (sem a / no fim).</summary>
+    public string WebUrl { get; }
+
+    /// <summary>
+    /// Cada pedido da parte web: "página canal", "spade {json}", "info canal", "token canal login", "usher canal sig=…",
+    /// "lista canal qualidade", "HEAD /seg/…" (e "GET /seg/…", que a Twitch leve não deve fazer).
+    /// </summary>
+    public List<string> Web
+    {
+        get
+        {
+            lock (_web)
+                return _web.ToList();
+        }
+    }
 
     /// <summary>Cada tópico pedido, com o login: "community-points-user-v1.id-x OAuth-token".</summary>
     public List<string> Listens
@@ -56,8 +77,7 @@ internal sealed class FakePubSub : IDisposable
                 var context = await _http.GetContextAsync();
                 if (!context.Request.IsWebSocketRequest)
                 {
-                    context.Response.StatusCode = 400;
-                    context.Response.Close();
+                    _ = ServeWebAsync(context);
                     continue;
                 }
                 var socket = (await context.AcceptWebSocketAsync(null)).WebSocket;
@@ -125,6 +145,120 @@ internal sealed class FakePubSub : IDisposable
         {
             lock (_clients)
                 _clients.RemoveAll(c => c.Socket == socket);
+        }
+    }
+
+    private void Note(string line)
+    {
+        lock (_web)
+            _web.Add(line);
+    }
+
+    /// <summary>A parte web da Twitch de mentira (a que a Twitch leve usa).</summary>
+    private async Task ServeWebAsync(HttpListenerContext context)
+    {
+        var request = context.Request;
+        var response = context.Response;
+        try
+        {
+            string path = request.Url!.AbsolutePath;
+            string body = request.HasEntityBody ? await new StreamReader(request.InputStream).ReadToEndAsync() : "";
+            int status = 200;
+            string type = "text/plain", text = "";
+            if (path == "/spade" && request.HttpMethod == "POST")
+            {
+                // data=<o evento em JSON, em base64>
+                string data = Uri.UnescapeDataString(body.StartsWith("data=") ? body[5..] : body);
+                Note("spade " + Encoding.UTF8.GetString(Convert.FromBase64String(data)));
+                status = 204;
+            }
+            else if (path.StartsWith("/config/settings"))
+            {
+                type = "application/javascript";
+                text = $"window.__twilightSettings = {{\"spade_url\":\"{WebUrl}/spade\",\"outro\":1}};";
+            }
+            else if (path == "/gql" && request.HttpMethod == "POST")
+            {
+                using var doc = JsonDocument.Parse(body);
+                var root = doc.RootElement;
+                type = "application/json";
+                if (root.TryGetProperty("operationName", out var op) && op.GetString() == "PlaybackAccessToken")
+                {
+                    string login = root.GetProperty("variables").GetProperty("login").GetString() ?? "";
+                    Note($"token {login} {request.Headers["Authorization"] ?? "sem login"}");
+                    text = JsonSerializer.Serialize(new
+                    {
+                        data = new { streamPlaybackAccessToken = new { value = $"{{\"channel\":\"{login}\"}}", signature = "sig1" } },
+                    });
+                }
+                else
+                {
+                    string login = root.GetProperty("variables").GetProperty("l").GetString() ?? "";
+                    Note($"info {login}");
+                    text = JsonSerializer.Serialize(new
+                    {
+                        data = new { user = new { id = "id-" + login, stream = new { id = "b-" + login, game = new { id = "g1", name = "PokeIdle" } } } },
+                    });
+                }
+            }
+            else if (path.StartsWith("/usher/api/channel/hls/"))
+            {
+                string login = Path.GetFileNameWithoutExtension(path);
+                Note($"usher {login} sig={request.QueryString["sig"]}");
+                type = "application/vnd.apple.mpegurl";
+                text = "#EXTM3U\n" +
+                       $"#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1280x720\n{WebUrl}/media/{login}/720p.m3u8\n" +
+                       $"#EXT-X-STREAM-INF:BANDWIDTH=230000,RESOLUTION=284x160\n{WebUrl}/media/{login}/160p.m3u8\n" +
+                       $"#EXT-X-STREAM-INF:BANDWIDTH=160000,CODECS=\"mp4a.40.2\"\n{WebUrl}/media/{login}/audio.m3u8\n";
+            }
+            else if (path.StartsWith("/media/"))
+            {
+                var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+                string login = parts[1], quality = Path.GetFileNameWithoutExtension(parts[2]);
+                Note($"lista {login} {quality}");
+                int n;
+                lock (_sequence)
+                    n = _sequence[login] = _sequence.GetValueOrDefault(login) + 1;
+                type = "application/vnd.apple.mpegurl";
+                text = $"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:{n}\n" +
+                       string.Concat(Enumerable.Range(n, 3).Select(s => $"#EXTINF:2.000,live\n/seg/{login}/{s}.ts\n"));
+            }
+            else if (path.StartsWith("/seg/"))
+            {
+                Note($"{request.HttpMethod} {path}");
+            }
+            else if (request.HttpMethod == "GET" && path.Count(c => c == '/') == 1 && path.Length > 1)
+            {
+                Note($"página {path[1..]}");
+                type = "text/html";
+                text = $"<html><head><script src=\"{WebUrl}/config/settings.test123.js\"></script></head><body></body></html>";
+            }
+            else
+            {
+                status = 404;
+            }
+            response.StatusCode = status;
+            response.ContentType = type;
+            if (status != 204 && request.HttpMethod != "HEAD" && text.Length > 0)
+            {
+                var bytes = Encoding.UTF8.GetBytes(text);
+                response.ContentLength64 = bytes.Length;
+                await response.OutputStream.WriteAsync(bytes);
+            }
+        }
+        catch
+        {
+            response.StatusCode = 500;
+        }
+        finally
+        {
+            try
+            {
+                response.Close();
+            }
+            catch
+            {
+            }
         }
     }
 
