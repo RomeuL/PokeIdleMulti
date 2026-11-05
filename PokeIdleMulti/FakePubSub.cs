@@ -39,6 +39,12 @@ internal sealed class FakePubSub : IDisposable
     public string WebUrl { get; }
 
     /// <summary>
+    /// Responde a leitura do saldo de fora da página (canal, Authorization, X-Device-Id → o JSON da Twitch). O deck liga
+    /// na Twitch de mentira dele, para o saldo ser o mesmo do player.
+    /// </summary>
+    public Func<string, string, string, string?>? Points { get; set; }
+
+    /// <summary>
     /// Cada pedido da parte web: "página canal", "spade {json}", "info canal", "token canal login", "usher canal sig=…",
     /// "lista canal qualidade", "HEAD /seg/…" (e "GET /seg/…", que a Twitch leve não deve fazer).
     /// </summary>
@@ -182,7 +188,14 @@ internal sealed class FakePubSub : IDisposable
                 using var doc = JsonDocument.Parse(body);
                 var root = doc.RootElement;
                 type = "application/json";
-                if (root.TryGetProperty("operationName", out var op) && op.GetString() == "PlaybackAccessToken")
+                if (root.TryGetProperty("variables", out var vars) && vars.TryGetProperty("login", out var pointsLogin)
+                    && root.TryGetProperty("query", out var pointsQuery) && pointsQuery.GetString()?.Contains("communityPoints") == true)
+                {
+                    // A leitura do saldo de fora da página (Twitch leve): responde o deck, com o mesmo saldo do player.
+                    text = Points?.Invoke(pointsLogin.GetString() ?? "", request.Headers["Authorization"] ?? "-", request.Headers["X-Device-Id"] ?? "-")
+                           ?? "{\"data\":null}";
+                }
+                else if (root.TryGetProperty("operationName", out var op) && op.GetString() == "PlaybackAccessToken")
                 {
                     string login = root.GetProperty("variables").GetProperty("login").GetString() ?? "";
                     Note($"token {login} {request.Headers["Authorization"] ?? "sem login"}");

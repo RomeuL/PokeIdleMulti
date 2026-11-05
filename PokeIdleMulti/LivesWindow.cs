@@ -79,6 +79,15 @@ internal sealed class LivesWindow : Form
         /// <summary>Recarregadas seguidas sem o vídeo voltar a andar (cada uma espera o dobro para a próxima).</summary>
         public int Retries { get; set; }
 
+        /// <summary>
+        /// O player parado da Twitch leve, que só abre para as ações: aberto agora (senão em branco), abrindo (os
+        /// pedidos que chegam juntos esperam o mesmo), quantas ações estão rodando nele e o fim da última.
+        /// </summary>
+        public bool Awake { get; set; }
+        public Task<bool>? Waking { get; set; }
+        public int Busy { get; set; }
+        public DateTime UsedAt { get; set; }
+
         /// <summary>A página do canal por cima do player (o chat e os pontos), só com a janela na tela.</summary>
         public WebView2? Chat { get; set; }
         public string? ChatChannel { get; set; }
@@ -151,6 +160,8 @@ internal sealed class LivesWindow : Form
         };
         _next.Click += (_, _) => NextRequested?.Invoke(SelectedSite ?? LiveSite.Kick);
         _stack.Resize += (_, _) => Arrange();
+        _sleep.Tick += (_, _) => SleepIdle();
+        _sleep.Start();
         Controls.Add(_stack);
         Controls.Add(_bar);
     }
@@ -185,6 +196,88 @@ internal sealed class LivesWindow : Form
 
     /// <summary>O tamanho da janela fora da tela (perto dos 284×160 do vídeo na menor qualidade).</summary>
     public Size ParkedSize => new(LogicalToDeviceUnits(360), LogicalToDeviceUnits(240));
+
+    /// <summary>
+    /// O player parado da Twitch leve só abre na hora de uma ação (o baú, o resgate, a raid, o momento: a checagem
+    /// anti-robô da Twitch só sai de dentro de uma página dela) e volta para o branco depois de <see cref="IdleClose"/>
+    /// sem uso. Parado à toa ele ficava com ~210 MB por conta.
+    /// </summary>
+    private bool OnDemand(Page page) => _lean && page.Url?.Contains(TwitchLive.Still) == true;
+
+    /// <summary>Quanto o player da Twitch leve fica aberto depois da última ação (o autoteste encurta).</summary>
+    public TimeSpan IdleClose { get; set; } = TimeSpan.FromSeconds(60);
+
+    /// <summary>Espera depois de abrir, antes da ação: o script anti-robô da Twitch começa depois da página (o autoteste zera).</summary>
+    public TimeSpan WakeSettle { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>Os players da Twitch leve abertos agora, e quantas vezes abriram (autoteste e menu Lives).</summary>
+    public int TwitchAwake => _pages.Count(p => p.Site == LiveSite.Twitch && p.Awake);
+    public int Wakes { get; private set; }
+
+    /// <summary>Quando a janela abriu (as aberturas do player contam daí).</summary>
+    public DateTime CreatedAt { get; } = DateTime.Now;
+
+    /// <summary>O endereço que cada página de <paramref name="site"/> tem carregado de verdade (autoteste).</summary>
+    public IEnumerable<string> Sources(LiveSite site) => _pages
+        .Where(p => p.Site == site && p.Url is not null).Select(p => p.View.CoreWebView2?.Source ?? "");
+
+    private readonly System.Windows.Forms.Timer _sleep = new() { Interval = 1000 };
+
+    /// <summary>Abre o player parado da Twitch leve (os pedidos juntos esperam a mesma abertura). Falso: não abriu.</summary>
+    private Task<bool> WakeAsync(Page page) => page.Awake ? Task.FromResult(true) : page.Waking ??= WakeCoreAsync(page);
+
+    private async Task<bool> WakeCoreAsync(Page page)
+    {
+        try
+        {
+            if (page.View.CoreWebView2 is not CoreWebView2 core || page.Url is not string url)
+                return false;
+            var done = new TaskCompletionSource<bool>();
+            void Completed(object? sender, CoreWebView2NavigationCompletedEventArgs e)
+            {
+                // O branco que ainda estava abrindo é cancelado pela abertura: esse não conta.
+                if (e.WebErrorStatus != CoreWebView2WebErrorStatus.OperationCanceled)
+                    done.TrySetResult(e.IsSuccess);
+            }
+            core.NavigationCompleted += Completed;
+            try
+            {
+                page.Loaded = false;
+                Wakes++;
+                core.Navigate(url);
+                bool ok = await Task.WhenAny(done.Task, Task.Delay(TimeSpan.FromSeconds(30))) == done.Task && done.Task.Result;
+                if (ok && WakeSettle > TimeSpan.Zero)
+                    await Task.Delay(WakeSettle);
+                // A vaga pode ter mudado (live saiu do ar) enquanto abria.
+                page.Awake = ok && page.Url == url && !IsDisposed && core.Source != "about:blank";
+            }
+            finally
+            {
+                core.NavigationCompleted -= Completed;
+            }
+            page.UsedAt = DateTime.Now;
+            return page.Awake;
+        }
+        catch (Exception e) when (e is InvalidOperationException or ObjectDisposedException or System.Runtime.InteropServices.COMException)
+        {
+            return false;
+        }
+        finally
+        {
+            page.Waking = null;
+        }
+    }
+
+    /// <summary>A cada segundo: o player da Twitch leve sem ação há <see cref="IdleClose"/> volta para o branco.</summary>
+    private void SleepIdle()
+    {
+        foreach (var page in _pages.Where(p => p.Awake && p.Busy == 0 && p.Waking is null && OnDemand(p)
+                                              && DateTime.Now - p.UsedAt >= IdleClose))
+        {
+            page.Awake = false;
+            page.View.CoreWebView2?.Navigate("about:blank");
+        }
+    }
 
     public int Count => _pages.Count(p => p.Url is not null);
     public int Loaded => _pages.Count(p => p.Url is not null && p.Loaded);
@@ -275,13 +368,23 @@ internal sealed class LivesWindow : Form
     public async Task<List<(string Channel, string Result)>> EvalLivesAsync(LiveSite site, Func<string, string> script, string? only = null)
     {
         var results = new List<(string, string)>();
-        foreach (var page in _pages.Where(p => p.Site == site && p.Channel is not null && p.Loaded && (only is null || p.Channel == only)).ToList())
+        foreach (var page in _pages.Where(p => p.Site == site && p.Channel is not null && (p.Loaded || OnDemand(p))
+                                              && (only is null || p.Channel == only)).ToList())
         {
             if (IsDisposed || page.Channel is not string channel || page.View.CoreWebView2 is not CoreWebView2 core)
                 continue;
+            // O player parado da Twitch leve abre para a ação e fica aberto até IdleClose depois da última.
+            bool onDemand = OnDemand(page);
+            if (onDemand)
+                page.Busy++;
             string result = "";
             try
             {
+                if (onDemand && !await WakeAsync(page))
+                {
+                    results.Add((channel, ""));
+                    continue;
+                }
                 var call = core.CallDevToolsProtocolMethodAsync("Runtime.evaluate",
                     JsonSerializer.Serialize(new { expression = script(channel), awaitPromise = true, returnByValue = true }));
                 if (await Task.WhenAny(call, Task.Delay(TimeSpan.FromSeconds(30))) == call)
@@ -295,6 +398,14 @@ internal sealed class LivesWindow : Form
             catch
             {
                 // A página recarregou ou fechou no meio: fica para a próxima conferência.
+            }
+            finally
+            {
+                if (onDemand)
+                {
+                    page.Busy--;
+                    page.UsedAt = DateTime.Now;
+                }
             }
             results.Add((channel, result));
         }
@@ -470,6 +581,7 @@ internal sealed class LivesWindow : Form
 
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
+        _sleep.Dispose();
         foreach (var page in _pages)
         {
             page.Chat?.Dispose();
@@ -605,7 +717,9 @@ internal sealed class LivesWindow : Form
         page.Playing = null;
         page.Button.Text = url is null ? "" : TabName(url, page.Site, channel);
         page.Button.Visible = url is not null;
-        page.View.CoreWebView2?.Navigate(url ?? "about:blank");
+        // O player parado da Twitch leve fica em branco (sem o processo da Twitch) até uma ação precisar dele.
+        page.Awake = false;
+        page.View.CoreWebView2?.Navigate(url is null || OnDemand(page) ? "about:blank" : url);
         // A página do chat segue a vaga: fecha se ela ficou em branco, troca se outra live entrou.
         if (page.Chat is not null && channel is null)
             CloseChat(page);

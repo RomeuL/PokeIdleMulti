@@ -496,13 +496,7 @@ internal sealed class DeckForm : Form
             return;
         }
         string Header(string name) => e.Request.Headers.Contains(name) ? e.Request.Headers.GetHeader(name) : "-";
-        var rewards = new[]
-        {
-            new { id = "xp", title = "Bônus +15% XP PokeIdle", prompt = "1 hora de +15% de XP no PokeIdle.", cost = 300 },
-            new { id = "cap", title = "Bônus de +15% Capture Boost", prompt = "1 hora de +15% na chance de captura no PokeIdle.", cost = 500 },
-            new { id = "lure", title = "Bônus de +15% Secret Lure", prompt = "1 hora de +15% na chance de shiny no PokeIdle.", cost = 1000 },
-            new { id = "chat", title = "Capture o streamer", prompt = "", cost = 100 },
-        };
+        var rewards = FakeTwitchRewards;
         string json;
         if (uri.AbsolutePath == "/integrity")
         {
@@ -574,41 +568,60 @@ internal sealed class DeckForm : Form
             }
             else
             {
-                string channel = variables.GetProperty("login").GetString() ?? "";
-                _fakeTwitch.Add($"saldo {channel} {Header("Authorization")} {Header("X-Device-Id")}");
-                object? communityPoints = channel == _fakeTwitchMe ? null : new
-                {
-                    balance = _fakeTwitchPoints.GetValueOrDefault(channel),
-                    availableClaim = _fakeTwitchClaims.Contains(channel) ? new { id = "bau-" + channel } : null,
-                };
-                json = JsonSerializer.Serialize(new
-                {
-                    data = new
-                    {
-                        currentUser = new { id = "id-" + _fakeTwitchMe, login = _fakeTwitchMe },
-                        user = new
-                        {
-                            id = "id-" + channel,
-                            channel = new
-                            {
-                                self = new { communityPoints },
-                                communityPointsSettings = new
-                                {
-                                    customRewards = rewards.Select(r => new
-                                    {
-                                        r.id, r.title, r.prompt, r.cost, isEnabled = true, isPaused = false, isInStock = true,
-                                        cooldownExpiresAt = (string?)null,
-                                    }),
-                                },
-                            },
-                        },
-                    },
-                });
+                json = FakeTwitchBalance(variables.GetProperty("login").GetString() ?? "", "saldo", Header("Authorization"), Header("X-Device-Id"));
             }
         }
         e.Response = _env.CreateWebResourceResponse(new MemoryStream(System.Text.Encoding.UTF8.GetBytes(json)), 200, "OK",
             "Content-Type: application/json");
     }
+
+    /// <summary>
+    /// O saldo de um canal na Twitch de mentira, com os bônus e o baú se tiver. Vale para o player (twitch.test, anota
+    /// "saldo …") e para a leitura de fora da página na Twitch leve (o servidor em localhost, anota "leitura …").
+    /// </summary>
+    private string FakeTwitchBalance(string channel, string kind, string authorization, string device)
+    {
+        _fakeTwitch.Add($"{kind} {channel} {authorization} {device}");
+        object? communityPoints = channel == _fakeTwitchMe ? null : new
+        {
+            balance = _fakeTwitchPoints.GetValueOrDefault(channel),
+            availableClaim = _fakeTwitchClaims.Contains(channel) ? new { id = "bau-" + channel } : null,
+        };
+        return JsonSerializer.Serialize(new
+        {
+            data = new
+            {
+                currentUser = new { id = "id-" + _fakeTwitchMe, login = _fakeTwitchMe },
+                user = new
+                {
+                    id = "id-" + channel,
+                    channel = new
+                    {
+                        self = new { communityPoints },
+                        communityPointsSettings = new
+                        {
+                            customRewards = FakeTwitchRewards.Select(r => new
+                            {
+                                r.id, r.title, r.prompt, r.cost, isEnabled = true, isPaused = false, isInStock = true,
+                                cooldownExpiresAt = (string?)null,
+                            }),
+                        },
+                    },
+                },
+            },
+        });
+    }
+
+    // Os bônus dos canais da Twitch de mentira (os 3 do PokeIdle e um de outro tipo).
+    private sealed record FakeReward(string id, string title, string prompt, int cost);
+
+    private static readonly FakeReward[] FakeTwitchRewards =
+    {
+        new("xp", "Bônus +15% XP PokeIdle", "1 hora de +15% de XP no PokeIdle.", 300),
+        new("cap", "Bônus de +15% Capture Boost", "1 hora de +15% na chance de captura no PokeIdle.", 500),
+        new("lure", "Bônus de +15% Secret Lure", "1 hora de +15% na chance de shiny no PokeIdle.", 1000),
+        new("chat", "Capture o streamer", "", 100),
+    };
 
     protected override void OnHandleCreated(EventArgs e)
     {
@@ -898,6 +911,10 @@ internal sealed class DeckForm : Form
                     : _config.Twitch[index].Slots == 0 ? "Twitch: todas fechadas no botão lives"
                     : _twitchLive.Count == 0 ? "Twitch: conferindo quem está no ar…"
                     : "Twitch: nenhuma live da lista no ar");
+            // Na Twitch leve, quantas vezes o player parado abriu para uma ação (o baú, ~4 por hora em cada live; muito
+            // mais que isso é a leitura do saldo de fora da página falhando, e a conferência abrindo o player).
+            if (window.Wakes > 0)
+                parts.Add($"player da Twitch abriu {window.Wakes}× desde {window.CreatedAt:HH:mm} (só para o baú e o resgate)");
             if (_config.Twitch[index].Limited && _config.Twitch[index].SlotsOf(_config.TwitchLives) > 0)
                 parts.Add("Twitch fechadas no botão lives: " + ShutText(index, LiveSite.Twitch));
             // Os avisos da Twitch (o websocket) fora do ar: o porquê (o login recusado para de vez; o resto tenta de novo).
@@ -1725,6 +1742,12 @@ internal sealed class DeckForm : Form
             _lives[index] = await LivesWindow.CreateAsync(_env, _panes[index].ProfileName, _config.AccountNames[index], urls,
                 twitchSlots, kickSlots, ChatUrl, SelfTestSetup);
             var window = _lives[index]!;
+            if (_selfTest)
+            {
+                // O player da Twitch leve: no autoteste abre na hora e fecha logo depois da ação.
+                window.IdleClose = TimeSpan.FromSeconds(1);
+                window.WakeSettle = TimeSpan.Zero;
+            }
             window.NextRequested += site => ShowNextPoints(index, site);
             window.PointsHeight = _config.KickPointsHeight;
             window.PointsHeightChanged += height =>
@@ -1835,6 +1858,20 @@ internal sealed class DeckForm : Form
     // A API da Twitch (no autoteste, a de mentira em twitch.test).
     private string TwitchApi => _selfTest ? "https://twitch.test" : "https://gql.twitch.tv";
 
+    // A mesma API, de fora do navegador (a leitura do saldo na Twitch leve). No autoteste, o servidor em localhost
+    // responde com o saldo da Twitch de mentira do player.
+    private string TwitchReadApi
+    {
+        get
+        {
+            if (!_selfTest)
+                return "https://gql.twitch.tv";
+            var fake = _fakePubSub ??= new FakePubSub();
+            fake.Points ??= (login, auth, device) => (string)Invoke(() => FakeTwitchBalance(login, "leitura", auth, device));
+            return fake.WebUrl;
+        }
+    }
+
     /// <summary>
     /// A cada 2 min, nas contas com live da Twitch aberta: o saldo de cada uma, o baú de bônus se tiver (com o baú ligado
     /// em Lives → Config…) e, nas contas com o resgate marcado, 1 resgate do bônus escolhido em cada live, se der.
@@ -1865,10 +1902,31 @@ internal sealed class DeckForm : Form
                     StopWatcher(i);
                     continue;
                 }
-                foreach (var (channel, result) in await window.EvalLivesAsync(LiveSite.Twitch,
-                             c => redeemer.TwitchScript(TwitchApi, c, token, device, reward, claim)))
-                    if (redeemer.Apply(channel, result) is string note)
-                        _panes[i].Note(note);
+                if (_config.TwitchLight[i])
+                {
+                    // Twitch leve: lê o saldo sem a página; o player parado só abre para pegar o baú ou resgatar.
+                    foreach (var channel in window.TwitchChannels.ToList())
+                    {
+                        string read = await PointsRedeemer.TwitchReadAsync(TwitchReadApi, channel, token, device, reward);
+                        if (!redeemer.NeedsPage(channel, read, claim))
+                        {
+                            if (redeemer.Apply(channel, read) is string note)
+                                _panes[i].Note(note);
+                            continue;
+                        }
+                        foreach (var (live, result) in await window.EvalLivesAsync(LiveSite.Twitch,
+                                     c => redeemer.TwitchScript(TwitchApi, c, token, device, reward, claim), channel))
+                            if (redeemer.Apply(live, result) is string note)
+                                _panes[i].Note(note);
+                    }
+                }
+                else
+                {
+                    foreach (var (channel, result) in await window.EvalLivesAsync(LiveSite.Twitch,
+                                 c => redeemer.TwitchScript(TwitchApi, c, token, device, reward, claim)))
+                        if (redeemer.Apply(channel, result) is string note)
+                            _panes[i].Note(note);
+                }
                 UpdatePubSub(i, token);
                 UpdateWatcher(i, token, device);
                 foreach (var quiet in redeemer.NewQuiet(window.TwitchChannels))
@@ -3501,6 +3559,59 @@ internal sealed class DeckForm : Form
             bool lowest = webLog.Contains("lista tftoddy 160p") && !webLog.Any(l => l.StartsWith("lista tftoddy 720p") || l.StartsWith("lista tftoddy audio"));
             bool headOnly = webLog.Any(l => l.StartsWith("HEAD /seg/tftoddy/")) && !webLog.Any(l => l.StartsWith("GET /seg/"));
             string lightSummary = LivesSummary(0);
+
+            // Twitch leve sob demanda: o player parado fica em branco (sem o processo da Twitch). A conferência de 2 em 2 min
+            // lê o saldo de fora da página e não abre o player à toa; o aviso do baú abre, pega e, sem ação, volta para o
+            // branco; a conferência abre para o baú que ficou esperando e para o resgate que dá.
+            bool blankIdle = false, readOutside = false, notWoken = false, claimWoke = false, sleptAgain = false, checkClaim = false, redeemWoke = false;
+            int wakesBefore = 0;
+            if (lightLives is not null && _fakePubSub is FakePubSub lightPubSub)
+            {
+                bool Blank() => lightLives.TwitchAwake == 0 && lightLives.Sources(LiveSite.Twitch).Any()
+                                && lightLives.Sources(LiveSite.Twitch).All(s => s == "about:blank");
+                blankIdle = await WaitFor(Blank, 10);
+                _fakeTwitch.Clear();
+                wakesBefore = lightLives.Wakes;
+                await TwitchPointsAsync();
+                readOutside = _fakeTwitch.Contains("leitura tftoddy OAuth tok123 dev123") && !_fakeTwitch.Any(l => l.StartsWith("saldo "));
+                notWoken = lightLives.Wakes == wakesBefore && Blank();
+
+                _fakeTwitchClaims.Add("tftoddy");
+                _fakeTwitch.Clear();
+                await lightPubSub.SendAsync(userTopic, new
+                {
+                    type = "claim-available",
+                    data = new { timestamp = DateTime.UtcNow.ToString("o"), claim = new { id = "bau-tftoddy", channel_id = "id-tftoddy" } },
+                });
+                claimWoke = await WaitFor(() => _fakeTwitch.Contains("baú bau-tftoddy OAuth tok123"), 15) && lightLives.Wakes == wakesBefore + 1;
+                sleptAgain = await WaitFor(Blank, 10);
+
+                _fakeTwitchClaims.Add("tftoddy");
+                _fakeTwitch.Clear();
+                await TwitchPointsAsync();
+                checkClaim = _fakeTwitch.Contains("leitura tftoddy OAuth tok123 dev123") && _fakeTwitch.Contains("baú bau-tftoddy OAuth tok123")
+                             && lightLives.Wakes == wakesBefore + 2;
+                await WaitFor(Blank, 10);
+
+                var redeemBefore = _config.RedeemTwitch[0];
+                _config.RedeemTwitch[0] = KickReward.Xp;
+                _fakeTwitchPoints["tftoddy"] = 400;
+                _fakeTwitch.Clear();
+                await TwitchPointsAsync();
+                redeemWoke = _fakeTwitch.Any(l => l.StartsWith("resgate tftoddy xp 300 OAuth tok123 ")) && lightLives.Wakes == wakesBefore + 3
+                             && _fakeTwitchPoints["tftoddy"] == 100;
+                _config.RedeemTwitch[0] = redeemBefore;
+                await WaitFor(Blank, 10);
+            }
+            string wakesSummary = LivesSummary(0);
+            Check("Twitch leve sob demanda: o player fica em branco, o saldo é lido sem ele, e ele só abre para o baú e o resgate",
+                blankIdle && readOutside && notWoken && claimWoke && sleptAgain && checkClaim && redeemWoke
+                && wakesSummary.Contains($"player da Twitch abriu {lightLives?.Wakes}× desde "),
+                $"em branco={blankIdle} leu fora={readOutside} não abriu={notWoken} baú pelo aviso={claimWoke} voltou ao branco={sleptAgain} " +
+                $"baú pela conferência={checkClaim} resgate={redeemWoke} aberturas={lightLives?.Wakes - wakesBefore} " +
+                $"páginas={string.Join(",", lightLives?.Sources(LiveSite.Twitch) ?? Array.Empty<string>())} | {wakesSummary} | " +
+                $"pedidos={string.Join(" | ", _fakeTwitch)}");
+
             _config.TwitchLight[0] = false;
             ApplyLives();
             await TwitchPointsAsync();

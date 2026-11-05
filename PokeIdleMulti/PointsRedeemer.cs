@@ -324,6 +324,125 @@ internal sealed class PointsRedeemer
                $"}})({args}).then(o => JSON.stringify(o))";
     }
 
+    // A mesma consulta do começo do TwitchScript: a conta, o canal, o saldo, o baú e os bônus.
+    private const string TwitchPointsQuery =
+        "query($login:String!){currentUser{id} user(login:$login){id channel{self{communityPoints{balance availableClaim{id}}}" +
+        " communityPointsSettings{customRewards{id title prompt cost isEnabled isPaused isInStock cooldownExpiresAt}}}}}";
+
+    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(20) };
+
+    // O navegador que o deck diz ser fora da página (o mesmo da Twitch leve).
+    private const string UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
+
+    /// <summary>
+    /// Na Twitch leve, a leitura de 2 em 2 min sem a página: a mesma consulta do <see cref="TwitchScript"/> (consultas
+    /// não passam pela checagem anti-robô), pela API em <paramref name="api"/>. Devolve o mesmo JSON que o script
+    /// devolveria sem agir (que <see cref="Apply"/> lê), com "claimId" quando o baú está esperando; ou { failed } quando o
+    /// pedido não passou (aí o deck usa a página, como antes).
+    /// </summary>
+    public static async Task<string> TwitchReadAsync(string api, string channel, string token, string? device, KickReward? reward)
+    {
+        static string Failed(string why) => JsonSerializer.Serialize(new { failed = why, error = "saldo: " + why });
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, api + "/gql");
+            request.Headers.TryAddWithoutValidation("User-Agent", UserAgent);
+            request.Headers.TryAddWithoutValidation("Client-Id", TwitchClientId);
+            request.Headers.TryAddWithoutValidation("Authorization", "OAuth " + token);
+            if (device is not null)
+                request.Headers.TryAddWithoutValidation("X-Device-Id", device);
+            request.Content = new StringContent(JsonSerializer.Serialize(new { query = TwitchPointsQuery, variables = new { login = channel } }),
+                System.Text.Encoding.UTF8, "text/plain");
+            using var response = await Http.SendAsync(request);
+            if (!response.IsSuccessStatusCode)
+                return Failed($"erro {(int)response.StatusCode}");
+            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            var root = doc.RootElement;
+            if (root.TryGetProperty("extensions", out var ext) && ext.ValueKind == JsonValueKind.Object && ext.TryGetProperty("challenge", out _))
+                return Failed("checagem anti-robô da Twitch");
+            if (!root.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object)
+                return Failed("sem resposta");
+            string? me = data.TryGetProperty("currentUser", out var cu) && cu.ValueKind == JsonValueKind.Object
+                         && cu.TryGetProperty("id", out var meId) ? meId.GetString() : null;
+            if (!data.TryGetProperty("user", out var user) || user.ValueKind != JsonValueKind.Object
+                || !user.TryGetProperty("channel", out var ch) || ch.ValueKind != JsonValueKind.Object)
+                return JsonSerializer.Serialize(new { error = "canal não encontrado" });
+            string? channelId = user.GetProperty("id").GetString();
+            JsonElement cp = default;
+            bool hasPoints = ch.TryGetProperty("self", out var self) && self.ValueKind == JsonValueKind.Object
+                             && self.TryGetProperty("communityPoints", out cp) && cp.ValueKind == JsonValueKind.Object
+                             && cp.TryGetProperty("balance", out var bal) && bal.ValueKind == JsonValueKind.Number;
+            if (!hasPoints)
+                return JsonSerializer.Serialize(new { me, channelId, error = "saldo: sem os pontos na resposta (login da Twitch?)" });
+            int points = cp.GetProperty("balance").GetInt32();
+            string? claimId = cp.TryGetProperty("availableClaim", out var claim) && claim.ValueKind == JsonValueKind.Object
+                              && claim.TryGetProperty("id", out var cid) ? cid.GetString() : null;
+            if (reward is not KickReward chosen)
+                return JsonSerializer.Serialize(new { points, me, channelId, claimId });
+            var word = new System.Text.RegularExpressions.Regex(Word(chosen), System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            JsonElement? found = null;
+            if (ch.TryGetProperty("communityPointsSettings", out var settings) && settings.ValueKind == JsonValueKind.Object
+                && settings.TryGetProperty("customRewards", out var rewards) && rewards.ValueKind == JsonValueKind.Array)
+                foreach (var r in rewards.EnumerateArray())
+                {
+                    string title = r.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "";
+                    string prompt = r.TryGetProperty("prompt", out var p) ? p.GetString() ?? "" : "";
+                    if (r.TryGetProperty("isEnabled", out var on) && on.ValueKind == JsonValueKind.True && word.IsMatch(title)
+                        && (title + " " + prompt).Contains("pokeidle", StringComparison.OrdinalIgnoreCase))
+                    {
+                        found = r;
+                        break;
+                    }
+                }
+            if (found is not JsonElement bonus)
+                return JsonSerializer.Serialize(new { points, me, channelId, claimId, error = "canal sem o bônus" });
+            bool paused = (bonus.TryGetProperty("isPaused", out var ip) && ip.ValueKind == JsonValueKind.True)
+                          || (bonus.TryGetProperty("isInStock", out var stock) && stock.ValueKind == JsonValueKind.False)
+                          || (bonus.TryGetProperty("cooldownExpiresAt", out var cool) && cool.ValueKind == JsonValueKind.String);
+            return JsonSerializer.Serialize(new
+            {
+                points, me, channelId, claimId, cost = bonus.GetProperty("cost").GetInt32(), title = bonus.GetProperty("title").GetString(), paused,
+            });
+        }
+        catch (Exception e) when (e is HttpRequestException or TaskCanceledException or JsonException or InvalidOperationException
+                                      or KeyNotFoundException or FormatException)
+        {
+            return Failed("sem resposta da Twitch");
+        }
+    }
+
+    /// <summary>
+    /// Na Twitch leve, se a leitura de fora da página (<see cref="TwitchReadAsync"/>) pede a página: o baú esperando
+    /// (com o baú ligado e sem espera de 30 min no canal), um resgate que dá agora (as mesmas regras do script), ou a
+    /// leitura que não passou.
+    /// </summary>
+    public bool NeedsPage(string channel, string json, bool claim)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("failed", out _))
+                return true;
+            _channels.TryGetValue(channel, out var c);
+            if (claim && root.TryGetProperty("claimId", out var id) && id.ValueKind == JsonValueKind.String
+                && (c is null || DateTime.Now >= c.ClaimRetryAt))
+                return true;
+            if (root.TryGetProperty("points", out var p) && p.TryGetInt32(out int points)
+                && root.TryGetProperty("cost", out var k) && k.TryGetInt32(out int cost)
+                && !(root.TryGetProperty("paused", out var z) && z.ValueKind == JsonValueKind.True))
+            {
+                var (spend, refund) = Plan(channel);
+                return spend && points >= cost && !(refund is int limit && points >= limit);
+            }
+            return false;
+        }
+        catch (JsonException)
+        {
+            return true;
+        }
+    }
+
     // A operação salva da Twitch para entrar numa raid (a mesma que o site manda ao clicar em "Entrar na raid").
     private const string JoinRaidHash = "c6a332a86d1087fbbb1a8623aa01bd1313d2386e7c63be60fdb2d1901f01a4ae";
 
