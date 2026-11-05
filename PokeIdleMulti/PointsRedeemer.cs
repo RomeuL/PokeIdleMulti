@@ -210,6 +210,33 @@ internal sealed class PointsRedeemer
         return string.Join(", ", parts);
     }
 
+    /// <summary>
+    /// O que deu errado com o baú no que o script de uma live devolveu (null: pegou, ou o erro do baú já foi para o
+    /// registro). Na Twitch leve o player abre só na hora, e uma falha sem erro do baú ficava sem rastro.
+    /// </summary>
+    public static string? ClaimProblem(string result)
+    {
+        if (result.Length == 0)
+            return "o player não respondeu em 30 s";
+        try
+        {
+            using var doc = JsonDocument.Parse(result);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("claimed", out _) || root.TryGetProperty("claimError", out _))
+                return null;
+            return root.TryGetProperty("error", out var e) ? e.GetString() : "a página não viu o baú";
+        }
+        catch (JsonException)
+        {
+            return "resposta estranha do player";
+        }
+    }
+
+    /// <summary>Só o saldo do canal, com o custo do bônus ("230/300"; "" antes da primeira leitura), para o resumo curto.</summary>
+    public string Balance(string channel) => _channels.TryGetValue(channel, out var c) && c.Points is int points
+        ? c.Cost is int cost ? $"{points}/{cost}" : $"{points}"
+        : "";
+
     // A partir desse saldo os pontos do último resgate voltaram (metade do custo: assistir dá 10 a cada 5 min, e o
     // baú da Twitch, 50 a cada ~15 min).
     private static int? RefundAt(Channel c) =>

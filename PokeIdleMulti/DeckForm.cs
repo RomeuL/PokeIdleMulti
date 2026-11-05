@@ -77,7 +77,6 @@ internal sealed class DeckForm : Form
     private readonly ToolStripButton _fullscreenButton = new("⛶ Tela cheia");
     private readonly ToolStripSplitButton _ultraButton = new("⚡ ULTRA");
     private readonly ToolStripStatusLabel _ram = new();
-    private readonly ToolStripStatusLabel _livesStatus = new();
     private readonly ToolStripStatusLabel _voteStatus = new();
     private readonly VoteState?[] _votes = new VoteState?[Accounts];
     private readonly DateTime[] _voteRefreshAt = new DateTime[Accounts];
@@ -114,16 +113,16 @@ internal sealed class DeckForm : Form
             _config.Off[3] = true;
             _config.TwitchLives = 1;
         }
-        // O registro dos resgates (o do autoteste começa vazio a cada vez).
-        var logPath = Path.Combine(_root, "resgates.log");
-        if (selfTest && File.Exists(logPath))
-            File.Delete(logPath);
-        _redeemLog = new RedeemLog(logPath);
+        // O registro dos resgates, um arquivo por conta (o do autoteste começa vazio a cada vez).
+        if (selfTest && Directory.Exists(_root))
+            foreach (var old in Directory.GetFiles(_root, "resgates*.log"))
+                File.Delete(old);
+        _redeemLog = new RedeemLog(_root, _config.AccountNames);
         for (int i = 0; i < Accounts; i++)
         {
             int index = i;
-            _redeemKick[i].Log = text => _redeemLog.Add(_config.AccountNames[index], LiveSite.Kick, text);
-            _redeemTwitch[i].Log = text => _redeemLog.Add(_config.AccountNames[index], LiveSite.Twitch, text);
+            _redeemKick[i].Log = text => _redeemLog.Add(index, _config.AccountNames[index], LiveSite.Kick, text);
+            _redeemTwitch[i].Log = text => _redeemLog.Add(index, _config.AccountNames[index], LiveSite.Twitch, text);
         }
         _store = new ExtensionStore(_root);
         if (_config.Layout != DeckLayout.Focus)
@@ -280,10 +279,7 @@ internal sealed class DeckForm : Form
         _status.SizingGrip = false;
         _status.ShowItemToolTips = true;
         _ram.ForeColor = Theme.Muted;
-        _livesStatus.ForeColor = Theme.Muted;
         _status.Items.Add(_ram);
-        _status.Items.Add(new ToolStripStatusLabel("·") { ForeColor = Theme.Muted });
-        _status.Items.Add(_livesStatus);
         _status.Items.Add(new ToolStripStatusLabel("·") { ForeColor = Theme.Muted });
         _voteStatus.ForeColor = Theme.Muted;
         _status.Items.Add(_voteStatus);
@@ -798,11 +794,6 @@ internal sealed class DeckForm : Form
         }
 
         _livesButton.Text = _config.LivesAccounts.Count == 0 ? "Lives: desligadas" : "Lives: ligadas";
-        var parts = Enumerable.Range(0, Accounts)
-            .Where(i => _lives[i] is not null)
-            .Select(i => $"{_config.AccountNames[i]}: {LivesSummary(i)}")
-            .ToList();
-        _livesStatus.Text = parts.Count == 0 ? "Lives desligadas" : "Lives · " + string.Join(" · ", parts);
         _kickButton.Visible = _lives.Any(l => l is not null && l.Tabs(LiveSite.Kick).Any());
         _twitchButton.Visible = _lives.Any(l => l is not null && l.Tabs(LiveSite.Twitch).Any());
         RenderLiveButtons();
@@ -894,8 +885,42 @@ internal sealed class DeckForm : Form
             items.Add(new ToolStripMenuItem($"Nenhuma live da {site} no ar agora") { Enabled = false });
     }
 
+    /// <summary>
+    /// O resumo curto do menu Lives: só as lives abertas e o saldo ("Twitch: tftoddy 1200 · Kick: biscoitao 230/300, yetz"),
+    /// com ⚠ quando pede uma ação. O completo (<see cref="LivesSummary"/>) fica em Lives → Detalhes….
+    /// </summary>
+    private string LivesShort(int index)
+    {
+        if (_lives[index] is not LivesWindow window)
+            return "";
+        var parts = new List<string>();
+        string Open(LiveSite site, PointsRedeemer redeemer) => string.Join(", ", LivesOpen(index, site)
+            .Select(c => redeemer.Balance(c) is { Length: > 0 } balance ? $"{c} {balance}" : c));
+        if (_twitchLogin[index] == false)
+            parts.Add("⚠ entre na Twitch (Lives → Mostrar)");
+        else if (window.TwitchChannels.Any())
+            parts.Add("Twitch: " + Open(LiveSite.Twitch, _redeemTwitch[index]));
+        if (window.KickChannels.Any())
+            parts.Add("Kick: " + Open(LiveSite.Kick, _redeemKick[index]));
+        if (_redeemTwitch[index].Stopped is not null || _redeemKick[index].Stopped is not null)
+            parts.Add("⚠ resgate parado (Detalhes…)");
+        else if ((_redeemKick[index].NoLogin && window.KickChannels.Any()) || (_redeemTwitch[index].NoLogin && window.TwitchChannels.Any()))
+            parts.Add("⚠ entre na Twitch/Kick nas lives");
+        return parts.Count == 0 ? "nenhuma live no ar" : string.Join(" · ", parts);
+    }
+
     /// <summary>"Twitch no ar: cogu ▶, Kick no ar: biscoitao ▶" ou "Twitch: entre na Twitch…".</summary>
-    private string LivesSummary(int index)
+    private string LivesSummary(int index) => string.Join(", ", LivesParts(index));
+
+    /// <summary>Lives → Detalhes…: o resumo completo de cada conta, uma informação por linha.</summary>
+    private void ShowLivesDetails()
+    {
+        var text = string.Join("\n\n", Enumerable.Range(0, Accounts).Where(i => _lives[i] is not null)
+            .Select(i => _config.AccountNames[i] + "\n" + string.Join("\n", LivesParts(i).Select(p => "• " + p))));
+        MessageBox.Show(this, text.Length == 0 ? "Nenhuma conta com lives." : text, "Detalhes das lives");
+    }
+
+    private List<string> LivesParts(int index)
     {
         var parts = new List<string>();
         if (_lives[index] is LivesWindow window)
@@ -948,7 +973,7 @@ internal sealed class DeckForm : Form
             if (window.Loaded < window.Count)
                 parts.Add("carregando…");
         }
-        return string.Join(", ", parts);
+        return parts;
     }
 
     private void OnClock()
@@ -1051,10 +1076,13 @@ internal sealed class DeckForm : Form
             long total = Usage.Sum(p => p.Bytes);
             double cores = Usage.Sum(p => p.Cores);
             string cpu = elapsed > 0 ? $"CPU ~{cores:0.0} núcleos" : "CPU medindo…";
-            long Bytes(string name) => Usage.First(p => p.Name == name).Bytes;
-            _ram.Text = $"RAM ~{Gb(total)} GB · {cpu}: jogo {Gb(Bytes("jogo"))} · Kick {Gb(Bytes("Kick"))} · " +
-                        $"Twitch {Gb(Bytes("Twitch"))} · vídeo {Gb(Bytes("placa de vídeo"))} · " +
-                        $"resto {Gb(Bytes("navegador e resto") + Bytes("deck"))}";
+            // Na barra só o total, as lives e o próprio deck; o resto (jogo, placa de vídeo…) fica na dica.
+            string Part(string label, string name)
+            {
+                var part = Usage.First(p => p.Name == name);
+                return $"{label} {Gb(part.Bytes)} GB" + (elapsed > 0 ? $" {part.Cores * 100:0}%" : "");
+            }
+            _ram.Text = $"RAM ~{Gb(total)} GB · {cpu} · {Part("Kick", "Kick")} · {Part("Twitch", "Twitch")} · {Part("Deck", "deck")}";
             _ram.ToolTipText =
                 string.Join("\n", Usage.Select(p => $"{p.Name}: {p.Bytes / 1024 / 1024} MB, " +
                                                     (elapsed > 0 ? $"{p.Cores * 100:0}% de um núcleo" : "CPU medindo…") +
@@ -1104,12 +1132,20 @@ internal sealed class DeckForm : Form
     /// Uma linha no consumo.log (pasta do deck), para comparar horas inteiras antes e depois de uma mudança.
     /// Passando de 2 MB (uns 2 meses), o antigo vira consumo.old.log.
     /// </summary>
-    private void LogUsage(long total, double cores) =>
-        AppendUsage(new[]
+    private void LogUsage(long total, double cores)
+    {
+        var lines = new List<string>
         {
             $"{DateTime.Now:dd/MM/yy HH:mm}  RAM {Gb(total)} GB, CPU {cores:0.00} núcleos | " +
             string.Join(" | ", Usage.Select(p => $"{p.Name} {p.Bytes / 1024 / 1024} MB {p.Cores:0.00}")),
-        });
+        };
+        // Na Twitch leve, quantas vezes o player abriu para o baú e o resgate (~4 por hora por live) e quantas não deram.
+        var wakes = Enumerable.Range(0, Accounts).Where(i => _lives[i] is { Wakes: > 0 })
+            .Select(i => $"{_config.AccountNames[i]} {_lives[i]!.Wakes}× ({_lives[i]!.WakeFailures} sem abrir)").ToList();
+        if (wakes.Count > 0)
+            lines.Add($"{DateTime.Now:dd/MM/yy HH:mm}  player da Twitch leve abriu: {string.Join(", ", wakes)}");
+        AppendUsage(lines);
+    }
 
     private void AppendUsage(IReadOnlyCollection<string> lines)
     {
@@ -1999,10 +2035,20 @@ internal sealed class DeckForm : Form
                                 _panes[i].Note(note);
                             continue;
                         }
-                        foreach (var (live, result) in await window.EvalLivesAsync(LiveSite.Twitch,
-                                     c => redeemer.TwitchScript(TwitchApi, c, token, device, reward, claim), channel))
+                        if (FailedRead(read) is string readFailed)
+                            LogTwitchProblem(i, channel, $"a leitura do saldo sem a página não passou ({readFailed}); abri o player");
+                        bool chestWaiting = read.Contains("\"claimId\":\"");
+                        var results = await window.EvalLivesAsync(LiveSite.Twitch,
+                            c => redeemer.TwitchScript(TwitchApi, c, token, device, reward, claim), channel);
+                        if (results.Count == 0)
+                            LogTwitchProblem(i, channel, "o player não abriu" + (chestWaiting ? " (com o baú esperando)" : ""));
+                        foreach (var (live, result) in results)
+                        {
+                            if (chestWaiting && PointsRedeemer.ClaimProblem(result) is string problem)
+                                LogTwitchProblem(i, live, $"o baú estava esperando, mas {problem}");
                             if (redeemer.Apply(live, result) is string note)
                                 _panes[i].Note(note);
+                        }
                     }
                 }
                 else
@@ -2023,6 +2069,36 @@ internal sealed class DeckForm : Form
             _twitchPointsBusy = false;
         }
         UpdateBar();
+    }
+
+    /// <summary>O motivo de uma leitura do saldo sem a página que não passou (null: passou).</summary>
+    private static string? FailedRead(string read)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(read);
+            return doc.RootElement.TryGetProperty("failed", out var why) ? why.GetString() : null;
+        }
+        catch (JsonException)
+        {
+            return "resposta estranha";
+        }
+    }
+
+    // A última vez que cada problema da Twitch leve foi ao registro (conta, canal e o começo do texto).
+    private readonly Dictionary<string, DateTime> _twitchProblemAt = new();
+
+    /// <summary>
+    /// Um problema da Twitch leve no registro dos resgates (o baú que não veio, o player que não abriu), no máximo um
+    /// igual a cada 10 min por canal, para dar para ver por que os baús param sem lotar o registro.
+    /// </summary>
+    private void LogTwitchProblem(int index, string channel, string text)
+    {
+        string key = $"{index} {channel} {text[..Math.Min(24, text.Length)]}";
+        if (_twitchProblemAt.TryGetValue(key, out var last) && DateTime.Now - last < TimeSpan.FromMinutes(10))
+            return;
+        _twitchProblemAt[key] = DateTime.Now;
+        _redeemLog.Add(index, _config.AccountNames[index], LiveSite.Twitch, $"{channel}: {text}");
     }
 
     // Os avisos da Twitch de cada conta (o websocket), e as raids e os momentos que cada uma já pegou.
@@ -2138,10 +2214,17 @@ internal sealed class DeckForm : Form
                     if (token is null)
                         return;
                     var reward = _config.RedeemTwitch[index];
-                    foreach (var (live, result) in await window.EvalLivesAsync(LiveSite.Twitch,
-                                 ch => redeemer.TwitchScript(TwitchApi, ch, token, device, reward, claim: true, spend: false), channel))
+                    var results = await window.EvalLivesAsync(LiveSite.Twitch,
+                        ch => redeemer.TwitchScript(TwitchApi, ch, token, device, reward, claim: true, spend: false), channel);
+                    if (results.Count == 0)
+                        LogTwitchProblem(index, channel, "o baú apareceu, mas o player não abriu");
+                    foreach (var (live, result) in results)
+                    {
+                        if (PointsRedeemer.ClaimProblem(result) is string problem)
+                            LogTwitchProblem(index, live, $"o baú apareceu, mas {problem}");
                         if (redeemer.Apply(live, result) is string note)
                             _panes[index].Note(note);
+                    }
                     break;
                 }
                 case ("raid", "raid_update_v2"):
@@ -2158,7 +2241,7 @@ internal sealed class DeckForm : Form
                     var result = (await window.EvalLivesAsync(LiveSite.Twitch, _ => PointsRedeemer.TwitchRaidScript(TwitchApi, token, device, raidId), channel))
                         .Select(r => r.Result).FirstOrDefault() ?? "";
                     string? error = TwitchActionError(result, "joined");
-                    _redeemLog.Add(_config.AccountNames[index], LiveSite.Twitch, error is null
+                    _redeemLog.Add(index, _config.AccountNames[index], LiveSite.Twitch, error is null
                         ? $"{channel}: entrou na raid (para {target})"
                         : $"{channel}: a raid (para {target}) não passou ({error})");
                     if (error is null)
@@ -2176,7 +2259,7 @@ internal sealed class DeckForm : Form
                     var result = (await window.EvalLivesAsync(LiveSite.Twitch, _ => PointsRedeemer.TwitchMomentScript(TwitchApi, token, device, momentId), channel))
                         .Select(r => r.Result).FirstOrDefault() ?? "";
                     string? error = TwitchActionError(result, "claimed");
-                    _redeemLog.Add(_config.AccountNames[index], LiveSite.Twitch, error is null
+                    _redeemLog.Add(index, _config.AccountNames[index], LiveSite.Twitch, error is null
                         ? $"{channel}: pegou o momento"
                         : $"{channel}: o momento não passou ({error})");
                     break;
@@ -2371,13 +2454,15 @@ internal sealed class DeckForm : Form
         {
             int index = i;
             string state = _panes[i].Off ? " — conta desligada (as lives voltam ao ligar)"
-                : _lives[i] is not null ? " — " + LivesSummary(i) : "";
+                : _lives[i] is not null ? " — " + LivesShort(i) : "";
             var item = new ToolStripMenuItem(_config.AccountNames[i] + state) { Checked = _config.LivesAccounts.Contains(i + 1) };
             item.Click += async (_, _) => await ToggleLivesAsync(index);
             items.Add(item);
         }
         items.Add(new ToolStripSeparator());
         items.Add("Mostrar as lives (para entrar na Twitch/Kick ou resgatar pontos)", null, (_, _) => ShowLives())
+            .Enabled = _lives.Any(l => l is not null);
+        items.Add("Detalhes… (tocando, Twitch leve, baús, pontos por hora)", null, (_, _) => ShowLivesDetails())
             .Enabled = _lives.Any(l => l is not null);
         int today = _redeemLog.Lines.Count(l => l.StartsWith(DateTime.Now.ToString("dd/MM/yy")));
         items.Add($"Registro dos resgates… ({today} hoje)", null, (_, _) => ShowRedeemLog());
@@ -2405,7 +2490,7 @@ internal sealed class DeckForm : Form
         _bulkWindow = new BulkRedeemDialog(_env, accounts, account,
             site => site == LiveSite.Kick ? KickApi : TwitchApi,
             (site, channel) => site == LiveSite.Kick ? KickUrl(channel) : TwitchUrl(channel), SelfTestSetup,
-            (i, site, text) => _redeemLog.Add(_config.AccountNames[i], site, text));
+            (i, site, text) => _redeemLog.Add(i, _config.AccountNames[i], site, text));
         _bulkWindow.Show(this);
     }
 
@@ -2417,7 +2502,7 @@ internal sealed class DeckForm : Form
             _redeemLogWindow.Activate();
             return;
         }
-        _redeemLogWindow = new RedeemLogWindow(_redeemLog);
+        _redeemLogWindow = new RedeemLogWindow(_redeemLog, _config.AccountNames);
         _redeemLogWindow.Show(this);
     }
 
@@ -3406,9 +3491,45 @@ internal sealed class DeckForm : Form
                 && Logged("Twitch · tftoddy: pegou o baú (+50, saldo 510)")
                 && Logged("Twitch · tftoddy: resgatou Bônus de +15% Capture Boost (500 pontos; sobraram 10)")
                 && Logged("Twitch · tftoddy: pegou o baú (+50, saldo 60)")
-                && File.ReadAllLines(_redeemLog.FilePath).SequenceEqual(logLines)
+                && Enumerable.Range(0, Accounts).All(i => (File.Exists(_redeemLog.FileOf(i)) ? File.ReadAllLines(_redeemLog.FileOf(i))
+                    : Array.Empty<string>()).SequenceEqual(_redeemLog.LinesOf(i)))
+                && logLines.Where(l => l.Contains($"  {account1} · ")).All(_redeemLog.LinesOf(0).Contains)
                 && logLines.Count > 0 && shownLog.StartsWith(logLines[^1]),
                 string.Join(" | ", logLines));
+
+            // Um arquivo por conta: o resgates.log antigo (todas as contas) é separado pelo nome da conta e vai para a
+            // Lixeira; ao abrir, cada conta fica só com os últimos 7 dias; a janela mostra uma conta ou todas; Limpar apaga
+            // só a conta escolhida.
+            var splitFolder = Path.Combine(_root, "resgates-teste");
+            Directory.CreateDirectory(splitFolder);
+            foreach (var leftover in Directory.GetFiles(splitFolder))
+                File.Delete(leftover);
+            string LogStamp(DateTime at) => at.ToString("dd/MM/yy HH:mm");
+            File.WriteAllLines(Path.Combine(splitFolder, "resgates.log"), new[]
+            {
+                $"{LogStamp(DateTime.Now.AddDays(-10))}  Ana · Kick · velho: some",
+                $"{LogStamp(DateTime.Now.AddMinutes(-5))}  Ana · Kick · canal: resgatou",
+                $"{LogStamp(DateTime.Now.AddMinutes(-4))}  Bia · Twitch · canal: pegou o baú",
+                $"{LogStamp(DateTime.Now.AddMinutes(-3))}  Ana · Twitch · canal: pegou o baú",
+            });
+            var split = new RedeemLog(splitFolder, new[] { "Ana", "Bia", "Cid", "Dani" });
+            bool splitOk = !File.Exists(Path.Combine(splitFolder, "resgates.log"))
+                && split.LinesOf(0).Count == 2 && split.LinesOf(0).All(l => l.Contains("  Ana · ")) && File.ReadAllLines(split.FileOf(0)).Length == 2
+                && split.LinesOf(1).Count == 1 && split.LinesOf(1)[0].Contains("  Bia · ") && !File.Exists(split.FileOf(2))
+                && split.Lines.Count == 3 && split.Lines[^1].EndsWith("Ana · Twitch · canal: pegou o baú");
+            split.Add(1, "Bia", LiveSite.Kick, "canal: resgatou");
+            var splitWindow = new RedeemLogWindow(split, new[] { "Ana", "Bia", "Cid", "Dani" });
+            splitWindow.ShowAccount(1);
+            string biaShown = splitWindow.ShownText;
+            splitWindow.Dispose();
+            split.Clear(0);
+            bool cleared = split.LinesOf(0).Count == 0 && !File.Exists(split.FileOf(0)) && split.LinesOf(1).Count == 2
+                && File.ReadAllLines(split.FileOf(1)).Length == 2 && split.Lines.Count == 2;
+            Check("registro dos resgates por conta: separa o antigo, guarda 7 dias, mostra uma conta e limpa só ela",
+                splitOk && biaShown.Split(Environment.NewLine).Length == 2 && biaShown.StartsWith(LogStamp(DateTime.Now)[..8])
+                && biaShown.Contains("Bia · Kick · canal: resgatou") && !biaShown.Contains("Ana") && cleared,
+                $"separou={splitOk} conta1={string.Join(" | ", split.LinesOf(0))} conta2={string.Join(" | ", split.LinesOf(1))} " +
+                $"janela da Bia={biaShown.Replace(Environment.NewLine, " / ")} limpou={cleared}");
 
             // Resgate em lote: o item só aparece no menu Lives com o Shift. Com a conta 1 (o login dela de novo) no
             // biscoitao, 2 XP + 1 Captura com 1500 pontos são 3 resgates (XP, Captura, XP), cada um com a descrição do
@@ -3944,9 +4065,11 @@ internal sealed class DeckForm : Form
             ToggleFullscreen();
             await Task.Delay(800);
             Check("sair da tela cheia volta como estava", Bounds == windowed && FormBorderStyle == FormBorderStyle.Sizable, $"{Bounds} antes {windowed}");
-            Check("RAM e CPU na barra, separadas por parte",
-                _ram.Text?.StartsWith("RAM ~") == true && _ram.Text.Contains(" CPU ") && _ram.Text.Contains(" jogo ")
-                && _ram.Text.Contains(" Kick "), _ram.Text ?? "");
+            // Na barra só o total, a Kick, a Twitch e o deck (sem conta nenhuma); o jogo e o resto ficam na dica.
+            Check("RAM e CPU na barra: o total, a Kick, a Twitch e o deck, sem as contas",
+                _ram.Text?.StartsWith("RAM ~") == true && _ram.Text.Contains(" CPU ") && _ram.Text.Contains(" · Kick ")
+                && _ram.Text.Contains(" · Twitch ") && _ram.Text.Contains(" · Deck ") && !_ram.Text.Contains("Conta")
+                && _ram.ToolTipText?.Contains("jogo: ") == true, _ram.Text ?? "");
         }
         catch (Exception ex)
         {

@@ -222,6 +222,9 @@ internal sealed class LivesWindow : Form
     public int TwitchAwake => _pages.Count(p => p.Site == LiveSite.Twitch && p.Awake);
     public int Wakes { get; private set; }
 
+    /// <summary>As aberturas que não deram (a página não carregou em 30 s, ou o navegador não abriu).</summary>
+    public int WakeFailures { get; private set; }
+
     /// <summary>Quando a janela abriu (as aberturas do player contam daí).</summary>
     public DateTime CreatedAt { get; } = DateTime.Now;
 
@@ -261,6 +264,8 @@ internal sealed class LivesWindow : Form
                     await Task.Delay(WakeSettle);
                 // A vaga pode ter mudado (live saiu do ar) enquanto abria.
                 page.Awake = ok && page.Url == url && !IsDisposed && page.View?.CoreWebView2 == core && core.Source != "about:blank";
+                if (!page.Awake)
+                    WakeFailures++;
             }
             finally
             {
@@ -271,6 +276,7 @@ internal sealed class LivesWindow : Form
         }
         catch (Exception e) when (e is InvalidOperationException or ObjectDisposedException or System.Runtime.InteropServices.COMException)
         {
+            WakeFailures++;
             return false;
         }
         finally
