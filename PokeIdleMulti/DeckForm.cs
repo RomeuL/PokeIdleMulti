@@ -2854,6 +2854,45 @@ internal sealed class DeckForm : Form
                 && !AdBlock.Blocked("https://challenges.cloudflare.com/x") && !AdBlock.Blocked("https://notgooglesyndication.com/"),
                 string.Join(",", ads));
 
+            // Sem DRM nas lives: o player que testa o vídeo protegido ouve "não dá", sem o Edge abrir o processo do DRM
+            // (~68 MB por conta). A consulta de capacidade com sistema de chave também diz que não.
+            const string DrmProbe = "navigator.requestMediaKeySystemAccess('com.widevine.alpha', [{ initDataTypes: ['cenc'], " +
+                "videoCapabilities: [{ contentType: 'video/mp4; codecs=\"avc1.42E01E\"' }] }]).then(() => 'aceitou', e => e.name + ': ' + e.message)";
+            const string CapsProbe = "navigator.mediaCapabilities.decodingInfo({ type: 'media-source', video: { contentType: " +
+                "'video/mp4; codecs=\"avc1.42E01E\"', width: 640, height: 360, bitrate: 1000000, framerate: 30 }, " +
+                "keySystemConfiguration: { keySystem: 'com.widevine.alpha' } }).then(r => 'supported=' + r.supported, e => e.name)";
+            var drm = new List<(string Channel, string Result)>();
+            var drmCaps = new List<(string Channel, string Result)>();
+            if (lives0 is not null)
+            {
+                drm.AddRange(await lives0.EvalLivesAsync(LiveSite.Kick, _ => DrmProbe));
+                drm.AddRange(await lives0.EvalLivesAsync(LiveSite.Twitch, _ => DrmProbe));
+                drmCaps.AddRange(await lives0.EvalLivesAsync(LiveSite.Kick, _ => CapsProbe));
+            }
+            Check("lives sem DRM (o player ouve que não dá, e o Edge não abre o processo do DRM)",
+                drm.Count == 3 && drm.All(d => d.Result == "NotSupportedError: sem DRM nas lives")
+                && drmCaps.Count == 2 && drmCaps.All(d => d.Result == "supported=false"),
+                string.Join(", ", drm.Concat(drmCaps).Select(d => $"{d.Channel}={d.Result}")));
+
+            // Fora da tela, a janela das lives fica pequena (a placa de vídeo desenha menos), com as lives empilhadas do
+            // tamanho dela (sem as colunas dos pontos, que deixariam a última estreita) e continuando a tocar.
+            var parkedFrames = lives0?.ColumnsOf(LiveSite.Kick).Concat(lives0.ColumnsOf(LiveSite.Twitch)).ToList() ?? new();
+            if (lives0 is not null)
+            {
+                await lives0.WatchAsync();
+                await Task.Delay(1500);
+                await lives0.WatchAsync();
+            }
+            var parkedPlay = lives0?.KickPlayback.ToDictionary(k => k.Channel) ?? new();
+            bool smallParked = lives0 is { Parked: true } && lives0.Size == lives0.ParkedSize
+                && parkedFrames.Count == 3 && parkedFrames.All(f => f.Frame == parkedFrames[0].Frame && f.View.Size == f.Frame.Size)
+                && parkedFrames[0].Frame.Width >= lives0.LogicalToDeviceUnits(300) && parkedFrames[0].Frame.Height >= lives0.LogicalToDeviceUnits(100)
+                && parkedPlay.TryGetValue("biscoitao", out var parkedBisc) && parkedBisc.Playing == true;
+            Check("lives fora da tela: janela pequena, lives empilhadas do tamanho dela e tocando (na tela, as colunas voltam)",
+                smallParked && sideBySide && fits,
+                $"janela={lives0?.Size} esperado={lives0?.ParkedSize} páginas={string.Join(" ", parkedFrames.Select(f => $"{f.Frame}/{f.View}"))} " +
+                $"biscoitao={(parkedPlay.TryGetValue("biscoitao", out var biscParked) ? biscParked.Playing?.ToString() ?? "?" : "fechada")}");
+
             Check("Kick: abre só as primeiras da lista que estão no ar, até o limite (2 de fábrica, ou o escolhido)",
                 KickLive.Pick(new[] { "biscoitao", "axt", "clovao", "outro" },
                     new Dictionary<string, bool?> { ["biscoitao"] = false, ["axt"] = true, ["clovao"] = true, ["outro"] = true }, 2)

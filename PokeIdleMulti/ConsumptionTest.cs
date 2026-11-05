@@ -36,7 +36,7 @@ internal sealed class ConsumptionTest : Form
         ShowInTaskbar = true;
         Size = new Size(420, 120);
         StartPosition = FormStartPosition.CenterScreen;
-        Controls.Add(new Label { Dock = DockStyle.Fill, Text = "Medindo o consumo das lives (uns 15 min). Fecha sozinho.", TextAlign = ContentAlignment.MiddleCenter });
+        Controls.Add(new Label { Dock = DockStyle.Fill, Text = "Medindo o consumo das lives (uns 20 min). Fecha sozinho.", TextAlign = ContentAlignment.MiddleCenter });
     }
 
     protected override async void OnShown(EventArgs e)
@@ -78,46 +78,54 @@ internal sealed class ConsumptionTest : Form
         if (twitch.Count < 4)
             twitch.AddRange((await TopTwitchAsync()).Where(c => !twitch.Contains(c)));
         twitch = twitch.Take(4).ToList();
-        string? kick = null;
+        // Até 2 da Kick, como o deck abre por conta.
+        var kick = new List<string>();
         foreach (var channel in official.KickChannels)
-            if (await KickLive.IsLiveAsync(channel) == true)
-            {
-                kick = channel;
-                break;
-            }
+            if (kick.Count < 2 && await KickLive.IsLiveAsync(channel) == true)
+                kick.Add(channel);
         _log.Add($"Teste de consumo das lives — {DateTime.Now:dd/MM/yyyy HH:mm}, {Environment.ProcessorCount} núcleos lógicos, " +
                  $"WebView2 {env.BrowserVersionString}");
-        _log.Add($"Twitch no ar usadas: {string.Join(", ", twitch)}; Kick: {kick ?? "nenhuma oficial no ar"}");
+        _log.Add($"Twitch no ar usadas: {string.Join(", ", twitch)}; Kick: {(kick.Count > 0 ? string.Join(", ", kick) : "nenhuma oficial no ar")}");
         _log.Add($"Cada cenário: {Warmup.TotalSeconds:0} s para firmar, depois {Sample.TotalSeconds:0} s medindo. CPU em % de um núcleo " +
                  "(100% = um núcleo inteiro) e em % do PC; RAM = memória privada somada de todos os processos do navegador embutido.");
         _log.Add("");
 
-        var scenarios = new List<(string Name, LiveSite Site, string[] Urls, bool Lean)>
+        var scenarios = new List<(string Name, LiveSite Site, string[] Urls, bool Lean, bool Cuts0511)>
         {
-            ("nenhuma live (só o navegador e uma página em branco)", LiveSite.Twitch, Array.Empty<string>(), true),
+            ("nenhuma live (só o navegador e uma página em branco)", LiveSite.Twitch, Array.Empty<string>(), true, true),
         };
+        // Os cenários com DRM ficam no fim: o processo do DRM pode continuar aberto depois que a página fecha.
+        var kickPlayers = kick.Select(c => $"https://player.kick.com/{c}").ToArray();
         if (twitch.Count > 0)
         {
-            scenarios.Add(("Twitch: 1 player", LiveSite.Twitch, twitch.Take(1).Select(TwitchLive.PlayerUrl).ToArray(), true));
-            scenarios.Add(("Twitch: 2 players", LiveSite.Twitch, twitch.Take(2).Select(TwitchLive.PlayerUrl).ToArray(), true));
+            scenarios.Add(("Twitch: 1 player", LiveSite.Twitch, twitch.Take(1).Select(TwitchLive.PlayerUrl).ToArray(), true, true));
+            scenarios.Add(("Twitch: 2 players", LiveSite.Twitch, twitch.Take(2).Select(TwitchLive.PlayerUrl).ToArray(), true, true));
             if (twitch.Count >= 4)
-                scenarios.Add(("Twitch: 4 players", LiveSite.Twitch, twitch.Take(4).Select(TwitchLive.PlayerUrl).ToArray(), true));
-            scenarios.Add(("Twitch: 1 página inteira do canal (com o chat)", LiveSite.Twitch, new[] { $"https://www.twitch.tv/{twitch[0]}" }, true));
-            scenarios.Add(("Twitch: 1 player SEM os cortes (qualidade original, propaganda, animações)", LiveSite.Twitch,
-                twitch.Take(1).Select(TwitchLive.PlayerUrl).ToArray(), false));
+                scenarios.Add(("Twitch: 4 players", LiveSite.Twitch, twitch.Take(4).Select(TwitchLive.PlayerUrl).ToArray(), true, true));
+            scenarios.Add(("Twitch: 1 página inteira do canal (com o chat)", LiveSite.Twitch, new[] { $"https://www.twitch.tv/{twitch[0]}" }, true, true));
         }
-        if (kick is not null)
-            scenarios.Add(("Kick: 1 player (para comparar)", LiveSite.Kick, new[] { $"https://player.kick.com/{kick}" }, true));
+        if (kick.Count > 0)
+        {
+            scenarios.Add(($"Kick: {kickPlayers.Length} player(s), como o deck abre", LiveSite.Kick, kickPlayers, true, true));
+            scenarios.Add(($"Kick: {kickPlayers.Length} player(s) como antes de 05/11 (com DRM e janela grande)", LiveSite.Kick, kickPlayers, true, false));
+        }
+        if (twitch.Count > 0)
+        {
+            scenarios.Add(("Twitch: 2 players como antes de 05/11 (com DRM e janela grande)", LiveSite.Twitch,
+                twitch.Take(2).Select(TwitchLive.PlayerUrl).ToArray(), true, false));
+            scenarios.Add(("Twitch: 1 player SEM os cortes (qualidade original, propaganda, animações, DRM, janela grande)", LiveSite.Twitch,
+                twitch.Take(1).Select(TwitchLive.PlayerUrl).ToArray(), false, false));
+        }
 
         foreach (var scenario in scenarios)
-            await MeasureAsync(env, scenario.Name, scenario.Site, scenario.Urls, scenario.Lean);
+            await MeasureAsync(env, scenario.Name, scenario.Site, scenario.Urls, scenario.Lean, scenario.Cuts0511);
     }
 
-    private async Task MeasureAsync(CoreWebView2Environment env, string name, LiveSite site, string[] urls, bool lean)
+    private async Task MeasureAsync(CoreWebView2Environment env, string name, LiveSite site, string[] urls, bool lean, bool cuts0511)
     {
         int slots = Math.Max(1, urls.Length);
         var window = await LivesWindow.CreateAsync(env, "consumo", "teste de consumo", Array.Empty<string>(),
-            site == LiveSite.Twitch ? slots : 0, site == LiveSite.Kick ? slots : 0, (_, c) => c, null, lean);
+            site == LiveSite.Twitch ? slots : 0, site == LiveSite.Kick ? slots : 0, (_, c) => c, null, lean, cuts0511);
         window.AllowClose = true;
         // Cada endereço numa vaga, como o deck faz com as lives no ar (o canal é só o nome da vaga).
         window.SetLives(site, urls.Select((url, i) => ($"live{i + 1}", url)).ToList());
@@ -154,13 +162,25 @@ internal sealed class ConsumptionTest : Form
         double core = total / seconds * 100;
 
         var videos = urls.Length == 0 ? new List<string>() : await window.EvalAsync(VideoState);
-        _log.Add($"== {name}");
+        // Os processos utility (rede, áudio, storage e o DRM, que tem uns 68 MB) e a janela, para ver os cortes de 05/11.
+        var utility = new List<long>();
+        foreach (var info in (await env.GetProcessExtendedInfosAsync()).Where(p => p.ProcessInfo.Kind == CoreWebView2ProcessKind.Utility))
+            try
+            {
+                using var process = Process.GetProcessById(info.ProcessInfo.ProcessId);
+                utility.Add(process.PrivateMemorySize64 / 1024 / 1024);
+            }
+            catch (ArgumentException)
+            {
+            }
+        _log.Add($"== {name} (medido até {DateTime.Now:HH:mm:ss})");
         _log.Add(string.Format(CultureInfo.InvariantCulture, "   CPU {0:0.0}% de um núcleo ({1:0.0}% do PC) · RAM {2:0} MB",
             core, core / Environment.ProcessorCount, ram.Count == 0 ? 0 : ram.Average() / 1024 / 1024));
         _log.Add("   CPU por parte: " + string.Join(", ", byKind.Where(k => k.Value > 0.05 * seconds / 100)
             .OrderByDescending(k => k.Value).Select(k => string.Format(CultureInfo.InvariantCulture, "{0} {1:0.0}%", k.Key, k.Value / seconds * 100))));
         if (videos.Count > 0)
             _log.Add("   vídeo: " + string.Join(" | ", videos.Select(v => JsonSerializer.Deserialize<string>(v))));
+        _log.Add($"   utility: {utility.Count} processos ({string.Join(", ", utility.OrderDescending().Select(mb => $"{mb} MB"))}) · janela {window.Size.Width}×{window.Size.Height}");
         _log.Add("   " + string.Join(" | ", window.Playback(site).Select(p => $"{p.Channel}: {(p.Playing == true ? "andando" : "parado")}, recarregou {p.Reloads}")));
         _log.Add("");
         File.WriteAllText(Report, string.Join(Environment.NewLine, _log));

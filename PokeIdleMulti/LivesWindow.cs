@@ -36,6 +36,8 @@ internal sealed class LivesWindow : Form
     private int _fitHeight;
     private bool _revealed;
     private bool _lean = true;
+    private bool _noDrm = true;
+    private bool _parkSmall = true;
     private CoreWebView2Environment _env = null!;
     private string _profile = "";
     private Action<CoreWebView2>? _setup;
@@ -85,6 +87,18 @@ internal sealed class LivesWindow : Form
 
     // Aceita o aviso de conteúdo adulto da Twitch (sem isso o vídeo nem começa), manda tocar se estiver pausado e
     // diz onde o vídeo está ("sem" quando a página não tem vídeo).
+    // Sem DRM nas lives: o player testa se dá para tocar vídeo protegido, e só isso faz o Edge abrir um processo de
+    // ~68 MB por conta (media.mojom.CdmServiceBroker). As lives não usam DRM. A consulta de capacidade com sistema de
+    // chave também pode abrir esse processo, então ela responde "não dá" sem perguntar ao navegador.
+    private const string NoDrmScript =
+        "(() => { const no = () => Promise.reject(new DOMException('sem DRM nas lives', 'NotSupportedError'));" +
+        " try { Object.defineProperty(Navigator.prototype, 'requestMediaKeySystemAccess', { value: no, configurable: true, writable: true }); } catch (e) {}" +
+        " const caps = window.MediaCapabilities && MediaCapabilities.prototype.decodingInfo;" +
+        " if (caps) try { Object.defineProperty(MediaCapabilities.prototype, 'decodingInfo', { configurable: true, writable: true," +
+        "   value: function (c) { return c && c.keySystemConfiguration" +
+        "     ? Promise.resolve({ supported: false, smooth: false, powerEfficient: false, configuration: c }) : caps.call(this, c); } }); } catch (e) {}" +
+        " })();";
+
     private const string PlayScript =
         "(() => { document.querySelector('[data-a-target=\"player-overlay-mature-accept\"], " +
         "[data-a-target=\"content-classification-gate-overlay-start-watching-button\"]')?.click(); " +
@@ -162,6 +176,15 @@ internal sealed class LivesWindow : Form
 
     /// <summary>A janela está fora da tela (rodando, mas sem aparecer).</summary>
     public bool Parked => !_revealed;
+
+    /// <summary>
+    /// Fora da tela ninguém vê as lives: a janela fica pequena, e a placa de vídeo desenha os players bem menores. O
+    /// vídeo continua à vista e tocando (escondido ou com 0×0, o navegador pausa vídeo mudo e a Kick para de contar).
+    /// </summary>
+    private bool ParkSmall => _lean && _parkSmall;
+
+    /// <summary>O tamanho da janela fora da tela (perto dos 284×160 do vídeo na menor qualidade).</summary>
+    public Size ParkedSize => new(LogicalToDeviceUnits(360), LogicalToDeviceUnits(240));
 
     public int Count => _pages.Count(p => p.Url is not null);
     public int Loaded => _pages.Count(p => p.Url is not null && p.Loaded);
@@ -290,13 +313,17 @@ internal sealed class LivesWindow : Form
     /// Cria a janela já rodando fora da tela: uma página para cada endereço fixo (a de entrar na Twitch),
     /// <paramref name="twitchSlots"/> vagas da Twitch e <paramref name="kickSlots"/> da Kick, preenchidas depois por
     /// <see cref="SetLives"/> com o player. <paramref name="chatUrl"/> dá a página do chat (com o botão dos pontos) de cada
-    /// canal, por site. <paramref name="lean"/> falso tira os cortes de consumo (só o teste de consumo usa, para comparar).
+    /// canal, por site. <paramref name="lean"/> falso tira os cortes de consumo; <paramref name="cuts0511"/> falso tira só os
+    /// de 05/11 (sem DRM e janela pequena fora da tela). Só o teste de consumo mexe neles, para comparar.
     /// </summary>
     public static async Task<LivesWindow> CreateAsync(CoreWebView2Environment env, string profile, string accountName,
         IEnumerable<string> urls, int twitchSlots, int kickSlots, Func<LiveSite, string, string> chatUrl, Action<CoreWebView2>? setup,
-        bool lean = true)
+        bool lean = true, bool cuts0511 = true)
     {
-        var window = new LivesWindow(accountName) { _env = env, _profile = profile, _setup = setup, _chatUrl = chatUrl, _lean = lean };
+        var window = new LivesWindow(accountName)
+        {
+            _env = env, _profile = profile, _setup = setup, _chatUrl = chatUrl, _lean = lean, _noDrm = cuts0511, _parkSmall = cuts0511,
+        };
         window.Park();
         window.Show();
         foreach (var url in urls)
@@ -355,7 +382,10 @@ internal sealed class LivesWindow : Form
         Activate();
     }
 
-    /// <summary>Tira da tela (os players continuam tocando; as páginas do chat fecham).</summary>
+    /// <summary>
+    /// Tira da tela (os players continuam tocando; as páginas do chat fecham). A janela fica pequena, com as lives
+    /// empilhadas do tamanho dela, sem as colunas dos pontos (a última coluna ficaria estreita demais e pausaria).
+    /// </summary>
     public void Park()
     {
         _revealed = false;
@@ -364,6 +394,11 @@ internal sealed class LivesWindow : Form
         WindowState = FormWindowState.Normal;
         var screens = SystemInformation.VirtualScreen;
         Location = new Point(screens.Right + 100, screens.Top);
+        if (ParkSmall)
+        {
+            Size = ParkedSize;
+            Arrange();
+        }
     }
 
     /// <summary>Onde está cada coluna de <paramref name="site"/> na janela, e a página que aparece nela (autoteste).</summary>
@@ -491,6 +526,9 @@ internal sealed class LivesWindow : Form
             // Ninguém fica olhando as lives: com o "reduzir movimento" do sistema, os sites cortam as animações deles.
             await core.CallDevToolsProtocolMethodAsync("Emulation.setEmulatedMedia",
                 "{\"features\":[{\"name\":\"prefers-reduced-motion\",\"value\":\"reduce\"}]}");
+            // Vale para a página e para os iframes dela, antes de qualquer script do site.
+            if (_noDrm)
+                await core.AddScriptToExecuteOnDocumentCreatedAsync(NoDrmScript);
         }
         _setup?.Invoke(core);
         return core;
@@ -596,8 +634,9 @@ internal sealed class LivesWindow : Form
     /// <summary>O site da aba escolhida (null: uma página fixa, como a de entrar na Twitch).</summary>
     private LiveSite? SelectedSite => _selected < _pages.Count ? _pages[_selected].Site : null;
 
-    // Numa aba de live, as lives daquele site lado a lado (a não ser com "Página inteira").
-    private bool Columns => !_fullPage.Checked && SelectedSite is LiveSite site && Open(site).Count > 0;
+    // Numa aba de live, as lives daquele site lado a lado (a não ser com "Página inteira"). Fora da tela, com a janela
+    // pequena, ficam empilhadas.
+    private bool Columns => (_revealed || !ParkSmall) && !_fullPage.Checked && SelectedSite is LiveSite site && Open(site).Count > 0;
 
     /// <summary>
     /// Quem fica na frente, e as colunas da Kick lado a lado. Só muda a ordem e o tamanho: as páginas de
