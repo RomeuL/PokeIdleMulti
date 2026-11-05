@@ -64,9 +64,9 @@ internal sealed class ChannelsDialog : Form
         _tips.SetToolTip(lightHeader, lightTip);
         var kickLightHeader = new Label { Text = "Kick leve", AutoSize = true, Margin = new Padding(3, 6, 0, 2) };
         redeemRows.Controls.Add(kickLightHeader, 4, 0);
-        const string kickLightTip = "Kick leve (em teste): o player da Kick fica em branco (abre só para resgatar), e quem assiste é o " +
-                                    "deck, sem navegador, mandando à Kick o que o player manda. Gasta quase nada. Ligue numa conta e " +
-                                    "compare os pontos por hora com uma conta com o player (kick-leve.log, na pasta do deck)";
+        const string kickLightTip = "Kick leve: o player da Kick fica em branco (abre só para resgatar), e quem assiste é o deck, sem " +
+                                    "navegador, mandando à Kick o que o player manda. Rende igual e gasta quase nada. O saldo de cada " +
+                                    "live vai para o kick-leve.log, na pasta do deck";
         _tips.SetToolTip(kickLightHeader, kickLightTip);
         for (int i = 0; i < accounts.Count; i++)
         {

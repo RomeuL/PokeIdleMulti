@@ -32,6 +32,9 @@ internal sealed class DeckForm : Form
     private readonly string _root;
     private readonly string _configPath;
     private readonly DeckConfig _config;
+
+    // No autoteste: a Kick leve veio ligada de fábrica (o autoteste desliga antes de abrir as lives).
+    private readonly bool _kickLightByDefault;
     private readonly ExtensionStore _store;
     private readonly AccountPane[] _panes = new AccountPane[Accounts];
     private readonly LivesWindow?[] _lives = new LivesWindow?[Accounts];
@@ -107,9 +110,11 @@ internal sealed class DeckForm : Form
         // O consumo.log só começa 10 min depois de abrir, quando tudo já carregou (no autoteste, na hora).
         _usageLogAt = selfTest ? DateTime.MinValue : DateTime.Now.AddMinutes(10);
         // O autoteste começa com a conta 4 desligada, como ficaria salvo do uso anterior, e com 1 live da Twitch
-        // (mais as 2 da Kick).
+        // (mais as 2 da Kick, com o player: a Kick leve, ligada de fábrica, tem o teste dela).
         if (selfTest)
         {
+            _kickLightByDefault = _config.KickLight.All(l => l);
+            _config.KickLight = new bool[Accounts];
             _config.Off[3] = true;
             _config.TwitchLives = 1;
         }
@@ -2898,7 +2903,7 @@ internal sealed class DeckForm : Form
 
         try
         {
-            // A Twitch leve vem ligada de fábrica; os testes do player da Twitch são com ele tocando, e a Twitch leve
+            // A Twitch leve e a Kick leve vêm ligadas de fábrica; os testes dos players são com eles tocando, e cada uma
             // tem o teste dela (que liga na conta 1).
             bool lightByDefault = _config.TwitchLight.All(l => l);
             _config.TwitchLight = new bool[Accounts];
@@ -4218,6 +4223,12 @@ internal sealed class DeckForm : Form
                 lightByDefault && new DeckConfig().TwitchLight.All(l => l) && lightOld.TwitchLight.All(l => l)
                 && lightSaved.TwitchLight.SequenceEqual(new[] { false, true, true, true }),
                 $"autoteste={lightByDefault} de antes={string.Join(",", lightOld.TwitchLight)} salva={string.Join(",", lightSaved.TwitchLight)}");
+            File.WriteAllText(redeemPath, "{ \"KickLight\": [ true, false ] }");
+            var kickLightSaved = DeckConfig.Load(redeemPath);
+            Check("Kick leve: ligada de fábrica em todas as contas (no deck.json de antes também), e a desligada fica salva",
+                _kickLightByDefault && new DeckConfig().KickLight.All(l => l) && lightOld.KickLight.All(l => l)
+                && kickLightSaved.KickLight.SequenceEqual(new[] { true, false, true, true }),
+                $"autoteste={_kickLightByDefault} de antes={string.Join(",", lightOld.KickLight)} salva={string.Join(",", kickLightSaved.KickLight)}");
             await WaitFor(() => _panes.All(p => p.Status == PaneStatus.Ok), 20);
             _kickLive.Clear();
 

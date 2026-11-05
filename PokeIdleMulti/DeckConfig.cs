@@ -107,9 +107,10 @@ internal sealed class DeckConfig
 
     /// <summary>
     /// A Kick leve em cada conta (Lives → Config…): o player das lives da Kick fica em branco (abre só para resgatar), e
-    /// quem assiste é o deck, sem navegador (<see cref="KickWatcher"/>). De fábrica desligada: em teste.
+    /// quem assiste é o deck, sem navegador (<see cref="KickWatcher"/>). Rende igual ao player (conferido em 05/11). De
+    /// fábrica ligada em todas as contas (também no deck.json de antes, que não tinha o campo); desliga em Lives → Config….
     /// </summary>
-    public bool[] KickLight { get; set; } = new bool[Accounts];
+    public bool[] KickLight { get; set; } = Enumerable.Repeat(true, Accounts).ToArray();
 
     /// <summary>
     /// Streamers oficiais na Kick, em ordem de prioridade. Abre a live inteira, que é o que rende pontos
@@ -176,7 +177,7 @@ internal sealed class DeckConfig
         config.Muted = Fill(config.Muted, _ => false);
         config.Off = Fill(config.Off, _ => false);
         config.TwitchLight = Fill(config.TwitchLight, _ => true);
-        config.KickLight = Fill(config.KickLight, _ => false);
+        config.KickLight = Fill(config.KickLight, _ => true);
         config.Kick = Fill(config.Kick, _ => new LiveLimit())
             .Select(k => k is { Closed: not null } ? k : new LiveLimit()).ToArray();
         config.KickLives = Math.Clamp(config.KickLives, 0, KickLive.MaxSlots);
