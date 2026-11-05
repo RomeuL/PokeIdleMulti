@@ -529,6 +529,12 @@ internal sealed class DeckForm : Form
                     json = "{\"errors\":[{\"message\":\"failed integrity check\",\"extensions\":{\"code\":\"IntegrityCheckFailed\"}}]," +
                            "\"data\":{\"claimCommunityPoints\":null},\"extensions\":{\"challenge\":{\"type\":\"integrity\"}}}";
                 }
+                else if (claim == "bau-pego")
+                {
+                    // O baú que outro lugar com a mesma conta já pegou.
+                    _fakeTwitch.Add($"baú {claim} {Header("Authorization")}");
+                    json = "{\"data\":{\"claimCommunityPoints\":{\"claim\":null,\"currentPoints\":null,\"error\":{\"code\":\"NOT_FOUND\"}}}}";
+                }
                 else
                 {
                     _fakeTwitch.Add($"baú {claim} {Header("Authorization")}");
@@ -3722,7 +3728,7 @@ internal sealed class DeckForm : Form
             bool listening = fakePubSub is not null && await WaitFor(() => fakePubSub.Listening(userTopic)
                 && fakePubSub.Listening("raid.id-tftoddy") && fakePubSub.Listening("community-moments-channel-v1.id-tftoddy"), 15);
             bool withLogin = fakePubSub?.Listens.Contains($"{userTopic} tok123") == true;
-            bool claimedNow = false, streak = false, raided = false, moment = false, quietShown = false, quietGone = false, badAuth = false;
+            bool claimedNow = false, gone = false, streak = false, raided = false, moment = false, quietShown = false, quietGone = false, badAuth = false;
             string earnedSummary = "", quietSummary = "";
             if (fakePubSub is not null && listening)
             {
@@ -3740,6 +3746,10 @@ internal sealed class DeckForm : Form
                 // Como na Twitch de verdade: a consulta não mostra o baú que o aviso deu, e ele vai com o id do aviso.
                 _fakeTwitchClaims.Remove("tftoddy");
                 _fakeTwitch.Clear();
+                // Um baú que outro lugar já pegou (NOT_FOUND) vai ao registro e não segura o próximo por 30 min.
+                await fakePubSub.SendAsync(userTopic, new { type = "claim-available", data = new { timestamp = Stamp(), claim = new { id = "bau-pego", channel_id = "id-tftoddy" } } });
+                gone = await WaitFor(() => _redeemLog.Lines.Any(l => l.EndsWith($"  {account1} · Twitch · tftoddy: o baú já tinha sido pego (a conta está aberta em outro lugar?)")), 15)
+                       && !LivesSummary(0).Contains("NOT_FOUND");
                 await fakePubSub.SendAsync(userTopic, new { type = "claim-available", data = new { timestamp = Stamp(), claim = new { id = "bau-tftoddy", channel_id = "id-tftoddy" } } });
                 claimedNow = await WaitFor(() => _fakeTwitch.Contains("baú bau-tftoddy OAuth tok123"), 15);
                 await fakePubSub.SendAsync(userTopic, Earn(450, "WATCH_STREAK", 600));
@@ -3768,9 +3778,9 @@ internal sealed class DeckForm : Form
                 badAuth = await WaitFor(() => refused.Error == "a Twitch recusou o login da conta nos avisos" && !refused.Connected, 10);
             }
             Check("avisos da Twitch: o baú na hora, a sequência de lives e o rendimento, a raid (uma vez) e o momento; live sem render avisa",
-                listening && withLogin && claimedNow && streak && earnedSummary.Contains("+450/h") && raided && moment && quietShown && quietGone
+                listening && withLogin && gone && claimedNow && streak && earnedSummary.Contains("+450/h") && raided && moment && quietShown && quietGone
                 && badAuth,
-                $"ouvindo={listening} login={withLogin} baú={claimedNow} sequência={streak} raid={raided} momento={moment} recusado={badAuth} " +
+                $"ouvindo={listening} login={withLogin} já pego={gone} baú={claimedNow} sequência={streak} raid={raided} momento={moment} recusado={badAuth} " +
                 $"sem render={quietShown}/{quietGone} | {earnedSummary} | {quietSummary} | pedidos={string.Join(" | ", _fakeTwitch)} | " +
                 $"tópicos={string.Join(", ", fakePubSub?.Listens ?? new List<string>())}");
 

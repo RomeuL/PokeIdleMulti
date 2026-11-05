@@ -311,7 +311,8 @@ internal sealed class PointsRedeemer
         var (canSpend, refund) = Plan(channel);
         spend = spend && canSpend;
         _channels.TryGetValue(channel, out var c);
-        claim = claim && (c is null || DateTime.Now >= c.ClaimRetryAt);
+        // O baú do aviso é um baú novo (outro id): vai mesmo com a espera de 30 min de um erro antes.
+        claim = claim && (claimId is not null || c is null || DateTime.Now >= c.ClaimRetryAt);
         var args = JsonSerializer.Serialize(new
         {
             api, channel, token, device, clientId = TwitchClientId, word = reward is KickReward r ? Word(r) : null, spend, refund, claim, claimId,
@@ -547,13 +548,16 @@ internal sealed class PointsRedeemer
             error = "a live não respondeu";
         }
 
-        // O baú (só na Twitch): pegou, ou deu errado e espera 30 min para tentar de novo naquele canal.
+        // O baú (só na Twitch): pegou, ou deu errado e espera 30 min para tentar de novo naquele canal. NOT_FOUND é o
+        // baú que alguém já pegou (a conta aberta em outro lugar): o próximo vem com outro id, então não espera.
         if (claimed)
         {
             c.ClaimedAt = DateTime.Now;
             c.ClaimError = null;
             Log?.Invoke($"{channel}: pegou o baú (+50" + (points is int now ? $", saldo {now})" : ")"));
         }
+        else if (claimError == "NOT_FOUND")
+            Log?.Invoke($"{channel}: o baú já tinha sido pego (a conta está aberta em outro lugar?)");
         else if (claimError is not null)
         {
             c.ClaimError = claimError;
