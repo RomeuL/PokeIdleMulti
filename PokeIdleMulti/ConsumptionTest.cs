@@ -35,9 +35,15 @@ internal sealed class ConsumptionTest : Form
         Icon = Theme.AppIcon;
         ShowInTaskbar = true;
         Size = new Size(420, 120);
-        StartPosition = FormStartPosition.CenterScreen;
+        // Abre num monitor que não é o principal (onde o usuário joga), quando tem mais de um, e sem pegar o foco.
+        StartPosition = FormStartPosition.Manual;
+        var area = (Screen.AllScreens.FirstOrDefault(s => !s.Primary) ?? Screen.PrimaryScreen!).WorkingArea;
+        Location = new Point(area.X + (area.Width - Width) / 2, area.Y + (area.Height - Height) / 2);
+        LivesWindow.NoFocus = true;
         Controls.Add(new Label { Dock = DockStyle.Fill, Text = "Medindo o consumo das lives (uns 20 min). Fecha sozinho.", TextAlign = ContentAlignment.MiddleCenter });
     }
+
+    protected override bool ShowWithoutActivation => true;
 
     protected override async void OnShown(EventArgs e)
     {
