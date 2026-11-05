@@ -245,8 +245,7 @@ internal sealed class DeckForm : Form
         _extensionsButton.ToolTipText = "Instalar e gerenciar as extensões de cada conta";
         _extensionsButton.Click += (_, _) => OpenExtensions();
         _livesButton.ToolTipText = Theme.Wrap("Lives da Twitch e da Kick tocando em segundo plano, juntando os pontos dos canais (o bônus das lives no jogo)");
-        // Com o Shift apertado aparece também o resgate em lote, escondido.
-        _livesButton.DropDownOpening += (_, _) => FillLivesMenu((ModifierKeys & Keys.Shift) == Keys.Shift);
+        _livesButton.DropDownOpening += (_, _) => FillLivesMenu();
         _livesButton.DropDownItems.Add("…");
         _kickButton.Alignment = ToolStripItemAlignment.Right;
         _kickButton.ToolTipText = Theme.Wrap("Abre os chats da Kick da conta, para resgatar os pontos do canal (300 pontos = 1 h de +15% de XP)");
@@ -2670,8 +2669,8 @@ internal sealed class DeckForm : Form
         UpdateBar();
     }
 
-    /// <summary>O menu Lives; <paramref name="hidden"/> (Shift apertado ao abrir) põe também o resgate em lote.</summary>
-    private void FillLivesMenu(bool hidden)
+    /// <summary>O menu Lives, com o resgate em lote sempre à vista (com o aviso: ele gasta os pontos de uma vez).</summary>
+    private void FillLivesMenu()
     {
         var items = _livesButton.DropDownItems;
         items.Clear();
@@ -2692,8 +2691,12 @@ internal sealed class DeckForm : Form
             .Enabled = _lives.Any(l => l is not null);
         int today = _redeemLog.Lines.Count(l => l.StartsWith(DateTime.Now.ToString("dd/MM/yy")));
         items.Add($"Registro dos resgates… ({today} hoje)", null, (_, _) => ShowRedeemLog());
-        if (hidden)
-            items.Add("Resgate em lote… (pontos da Twitch e da Kick)", null, (_, _) => ShowBulkRedeem());
+        var bulkItem = new ToolStripMenuItem("Resgate em lote… (CUIDADO)", null, (_, _) => ShowBulkRedeem())
+        {
+            ToolTipText = "Resgata vários bônus de uma vez com os pontos da Twitch ou da Kick de uma conta. Gasta os pontos na hora " +
+                          "e não tem volta: confira a conta, o canal e as quantidades antes de começar",
+        };
+        items.Add(bulkItem);
         items.Add("Config…", null, async (_, _) => await EditChannelsAsync());
     }
 
@@ -3811,19 +3814,17 @@ internal sealed class DeckForm : Form
                 $"separou={splitOk} conta1={string.Join(" | ", split.LinesOf(0))} conta2={string.Join(" | ", split.LinesOf(1))} " +
                 $"janela da Bia={biaShown.Replace(Environment.NewLine, " / ")} limpou={cleared}");
 
-            // Resgate em lote: o item só aparece no menu Lives com o Shift. Com a conta 1 (o login dela de novo) no
+            // Resgate em lote: o item fica sempre no menu Lives, com o (CUIDADO). Com a conta 1 (o login dela de novo) no
             // biscoitao, 2 XP + 1 Captura com 1500 pontos são 3 resgates (XP, Captura, XP), cada um com a descrição do
             // bônus (senão a Twitch de mentira recusa) e um transactionID novo; saem 1100 e o saldo do fim é lido de novo.
             twitchCookies.AddOrUpdateCookie(twitchCookies.CreateCookie("auth-token", "tok123", ".twitch.tv", "/"));
             twitchCookies.AddOrUpdateCookie(twitchCookies.CreateCookie("unique_id", "dev123", ".twitch.tv", "/"));
             _fakeTwitchPoints["biscoitao"] = 1500;
             bool HasBulk() => _livesButton.DropDownItems.Cast<ToolStripItem>().Any(x => x.Text?.StartsWith("Resgate em lote") == true);
-            FillLivesMenu(false);
-            bool bulkHidden = !HasBulk();
-            FillLivesMenu(true);
-            bool bulkShown = HasBulk();
+            FillLivesMenu();
+            bool bulkShown = HasBulk() && _livesButton.DropDownItems.Cast<ToolStripItem>().Any(x => x.Text == "Resgate em lote… (CUIDADO)");
             _livesButton.DropDownItems.Cast<ToolStripItem>().FirstOrDefault(x => x.Text?.StartsWith("Resgate em lote") == true)?.PerformClick();
-            FillLivesMenu(false);
+            FillLivesMenu();
             var bulk = _bulkWindow;
             string bulkBefore = "", bulkEnd = "";
             bool bulkRead = false, bulkReady = false;
@@ -3846,12 +3847,12 @@ internal sealed class DeckForm : Form
                 && System.Text.RegularExpressions.Regex.IsMatch(bulkRedeems[1], "^resgate biscoitao cap 500 OAuth tok123 [0-9a-f]{32}$")
                 && System.Text.RegularExpressions.Regex.IsMatch(bulkRedeems[2], "^resgate biscoitao xp 300 OAuth tok123 [0-9a-f]{32}$")
                 && bulkRedeems.Select(r => r.Split(' ')[^1]).Distinct().Count() == 3;
-            Check("resgate em lote: só aparece no Lives com o Shift; 2 XP + 1 Captura são 3 resgates com a descrição do bônus, e lê o saldo no fim",
-                bulkHidden && bulkShown && bulk is not null && bulkRead && bulkReady && bulkOrder
+            Check("resgate em lote: sempre no menu Lives, com o (CUIDADO); 2 XP + 1 Captura são 3 resgates com a descrição do bônus, e lê o saldo no fim",
+                bulkShown && bulk is not null && bulkRead && bulkReady && bulkOrder
                 && bulkBefore.Contains("fulano_twitch tem 1.500 pontos em biscoitao") && bulkBefore.Contains("Total: 1.100 pontos (sobram 400)")
                 && bulk.Done == 3 && bulk.Stop is null && _fakeTwitchPoints["biscoitao"] == 400 && _fakeTwitch[^1].StartsWith("saldo biscoitao")
                 && bulkEnd.EndsWith("Fim: 3 de 3. Saldo agora: 400."),
-                $"menu={bulkHidden}/{bulkShown} leu={bulkRead} pronto={bulkReady} | {bulkBefore.Replace(Environment.NewLine, " ")} | " +
+                $"menu={bulkShown} leu={bulkRead} pronto={bulkReady} | {bulkBefore.Replace(Environment.NewLine, " ")} | " +
                 $"pedidos={string.Join(" | ", _fakeTwitch)} | {bulkEnd} saldo={_fakeTwitchPoints["biscoitao"]}");
 
             // Sem saldo para o lote, não começa (nenhum resgate). Com saldo, mas os pontos gastos por fora depois do 1º

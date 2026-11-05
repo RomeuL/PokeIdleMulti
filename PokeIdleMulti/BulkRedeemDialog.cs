@@ -6,7 +6,7 @@ using Microsoft.Web.WebView2.WinForms;
 namespace PokeIdleMulti;
 
 /// <summary>
-/// O resgate em lote (escondido: Shift + clique em Lives): N de cada bônus do PokeIdle num canal da Twitch ou da Kick de
+/// O resgate em lote (menu Lives → Resgate em lote… (CUIDADO)): N de cada bônus do PokeIdle num canal da Twitch ou da Kick de
 /// uma vez, com os pontos de uma conta do deck (o login do site fica no perfil dela). Mostra o saldo e o custo antes e não
 /// começa sem saldo; o dono do canal tem pontos infinitos (∞) e não precisa de saldo. Resgata um por vez, de 1 a 2 s
 /// entre um e outro, e para no primeiro erro do site. Os pedidos são os do resgate automático (<see cref="PointsRedeemer"/>),
