@@ -503,8 +503,12 @@ internal sealed class LivesWindow : Form
         // Primeiro para a tela certa (lá a escala pode ser outra), depois do tamanho dela.
         Location = area.Location;
         Select(tab >= 0 ? tab : Math.Max(0, _pages.FindIndex(p => p.Url is not null)));
-        Activate();
+        if (!NoFocus)
+            Activate();
     }
+
+    /// <summary>Não pega o foco ao aparecer (o autoteste, para não atrapalhar quem está usando o PC).</summary>
+    public static bool NoFocus { get; set; }
 
     /// <summary>
     /// Tira da tela (os players continuam tocando; as páginas do chat fecham). A janela fica pequena, com as lives

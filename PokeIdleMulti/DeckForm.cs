@@ -100,6 +100,7 @@ internal sealed class DeckForm : Form
     public DeckForm(bool selfTest)
     {
         _selfTest = selfTest;
+        LivesWindow.NoFocus = selfTest;
         // O autoteste usa perfis e páginas de teste separados, para não mexer nas suas contas.
         _root = selfTest ? Path.Combine(DataRoot, "selftest") : DataRoot;
         _configPath = Path.Combine(_root, "deck.json");
@@ -655,8 +656,13 @@ internal sealed class DeckForm : Form
     private void RestoreWindowBounds()
     {
         var saved = _config.WindowBounds is { Length: 4 } b ? new Rectangle(b[0], b[1], b[2], b[3]) : Rectangle.Empty;
+        // O autoteste abre num monitor que não é o principal (onde o usuário joga), quando tem mais de um. As outras
+        // janelas do deck (lives, popups, registro) abrem na tela da janela principal e vão junto.
         if (_selfTest)
-            saved = new Rectangle(80, 60, 1500, 900);
+        {
+            var area = (Screen.AllScreens.FirstOrDefault(s => !s.Primary) ?? Screen.PrimaryScreen!).WorkingArea;
+            saved = new Rectangle(area.X + 80, area.Y + 60, 1500, 900);
+        }
         if (saved.Width >= MinimumSize.Width && saved.Height >= MinimumSize.Height
             && Screen.AllScreens.Any(s => s.WorkingArea.IntersectsWith(saved)))
         {
@@ -672,6 +678,9 @@ internal sealed class DeckForm : Form
         if (_config.Maximized && !_selfTest)
             WindowState = FormWindowState.Maximized;
     }
+
+    // O autoteste não rouba o foco de quem está usando o PC (jogando no outro monitor): abre sem ativar.
+    protected override bool ShowWithoutActivation => _selfTest;
 
     private void SaveWindowBounds()
     {
@@ -2955,7 +2964,6 @@ internal sealed class DeckForm : Form
             lives0?.Close();
             await Task.Delay(300);
             int chatsAfter = lives0?.ChatsOpen ?? -1;
-            Activate();
             Check("chat da Kick só abre com os pontos na tela (só o rodapé, sem as mensagens), e fecha ao sair",
                 chatsParked == 0 && chatsUp && chatShown == "\"block hidden\",\"block hidden\"" && chatsAfter == 0
                 && lives0 is { Parked: true, Visible: true },
@@ -2972,7 +2980,6 @@ internal sealed class DeckForm : Form
             var twitchColumn = lives0?.ColumnsOf(LiveSite.Twitch).ToList() ?? new();
             lives0?.Close();
             await Task.Delay(300);
-            Activate();
             Check("💰 Pontos da Twitch: abre o chat em janela de cada live da Twitch da conta, e fecha ao sair",
                 twitchPointsButton && twitchChatUp && twitchChats.SequenceEqual(new[] { "\"?canal=tftoddy&chat=1\"" })
                 && twitchColumn.Count == 1 && twitchColumn[0].View.Size == twitchColumn[0].Frame.Size && lives0?.ChatsOpen == 0,
@@ -3392,7 +3399,6 @@ internal sealed class DeckForm : Form
             await Task.Delay(300);
             string shownLog = _redeemLogWindow?.ShownText ?? "";
             _redeemLogWindow?.Close();
-            Activate();
             Check("registro dos resgates: grava resgates, baús e pontos que voltaram no resgates.log, e mostra o mais novo em cima",
                 Logged("Kick · biscoitao: resgatou Bônus de +15% Capture Boost (500 pontos; sobraram 710)")
                 && Logged("Kick · biscoitao: resgatou Bônus de +15% Capture Boost (500 pontos; sobraram 210)")
@@ -3552,7 +3558,6 @@ internal sealed class DeckForm : Form
                 _fakeTwitchMe = "fulano_twitch";
                 _fakeKickMe = "fulano_kick";
                 bulk.Close();
-                Activate();
             }
             int ownerTwitchRedeems = _fakeTwitch.Count(r => r.StartsWith("resgate biscoitao lure 1000 OAuth tok123 "));
             int ownerKickRedeems = _fakeRedeems.Skip(ownerKickFrom).Count(r => r.StartsWith("biscoitao lure Bearer 123|abc "));
@@ -3814,7 +3819,6 @@ internal sealed class DeckForm : Form
             // Lado a lado: cada coluna começa num lugar diferente da janela.
             int columns3 = lives3?.KickLayout.Select(c => c.Frame.Left).Distinct().Count() ?? 0;
             lives3?.Close();
-            Activate();
             SetKickLives(2);
             CloseLives(0);
             await OpenLivesAsync(0);
