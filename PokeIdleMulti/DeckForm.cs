@@ -1075,19 +1075,25 @@ internal sealed class DeckForm : Form
             Usage = parts.Select(p => new UsagePart(p.Key, p.Value.Bytes, p.Value.Cores, p.Value.Processes)).ToList();
             long total = Usage.Sum(p => p.Bytes);
             double cores = Usage.Sum(p => p.Cores);
-            string cpu = elapsed > 0 ? $"CPU ~{cores:0.0} núcleos" : "CPU medindo…";
+            // CPU em % do processador inteiro, como no Gerenciador de Tarefas.
+            static string Pct(double used)
+            {
+                double pct = used * 100 / Environment.ProcessorCount;
+                return (pct < 10 ? pct.ToString("0.#") : pct.ToString("0")) + "%";
+            }
+            string cpu = elapsed > 0 ? $"CPU {Pct(cores)}" : "CPU medindo…";
             // Na barra só o total, as lives e o próprio deck; o resto (jogo, placa de vídeo…) fica na dica.
             string Part(string label, string name)
             {
                 var part = Usage.First(p => p.Name == name);
-                return $"{label} {Gb(part.Bytes)} GB" + (elapsed > 0 ? $" {part.Cores * 100:0}%" : "");
+                return $"{label} {Gb(part.Bytes)} GB" + (elapsed > 0 ? $" {Pct(part.Cores)}" : "");
             }
             _ram.Text = $"RAM ~{Gb(total)} GB · {cpu} · {Part("Kick", "Kick")} · {Part("Twitch", "Twitch")} · {Part("Deck", "deck")}";
             _ram.ToolTipText =
                 string.Join("\n", Usage.Select(p => $"{p.Name}: {p.Bytes / 1024 / 1024} MB, " +
-                                                    (elapsed > 0 ? $"{p.Cores * 100:0}% de um núcleo" : "CPU medindo…") +
+                                                    (elapsed > 0 ? $"{Pct(p.Cores)} da CPU" : "CPU medindo…") +
                                                     $" ({p.Processes} {(p.Processes == 1 ? "processo" : "processos")})")) +
-                $"\ntotal: {Gb(total)} GB, {(elapsed > 0 ? $"{cores:0.0} de {Environment.ProcessorCount} núcleos" : "CPU medindo…")}\n" +
+                $"\ntotal: {Gb(total)} GB, {(elapsed > 0 ? $"{Pct(cores)} da CPU ({Environment.ProcessorCount} núcleos)" : "CPU medindo…")}\n" +
                 Theme.Wrap("Memória privada (a que pesa no PC); CPU dos últimos 10 s. A cada 10 min vai uma linha para o " +
                            "consumo.log, na pasta do deck. Para aliviar: feche lives no botão lives do cabeçalho, abra menos " +
                            "lives (Lives → Config…) ou desligue as contas que não está usando.", 60, 6);
@@ -3299,7 +3305,7 @@ internal sealed class DeckForm : Form
                 usage.Count == 6 && usage["jogo"].Processes >= 1 && usage["Kick"].Processes >= 1 && usage["Twitch"].Processes >= 1
                 && usage["placa de vídeo"].Processes >= 1 && usage["deck"].Processes == 1
                 && Usage.Sum(p => p.Cores) > 0 && Math.Abs(usageTotal - counted) < counted * 0.1
-                && _ram.Text.Contains(" Kick ") && _ram.Text.Contains(" Twitch ") && _ram.ToolTipText.Contains("% de um núcleo")
+                && _ram.Text.Contains(" Kick ") && _ram.Text.Contains(" Twitch ") && _ram.ToolTipText.Contains("% da CPU")
                 && usageLog.Contains(" | Kick ") && usageLog.Contains(" | Twitch "),
                 string.Join(", ", Usage.Select(p => $"{p.Name} {p.Bytes / 1024 / 1024} MB {p.Cores:0.00} ({p.Processes})")) +
                 $" | contado {counted / 1024 / 1024} MB | barra: {_ram.Text} | log: {usageLog.Trim()}");
