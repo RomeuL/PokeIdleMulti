@@ -302,8 +302,11 @@ internal sealed class PointsRedeemer
     /// (como no baú), pede o token dela de dentro do player, como o próprio site faz (o Kasada do player entra no
     /// pedido), e manda de novo. Devolve também o id da conta e o do canal (os avisos da Twitch vêm por id).
     /// <paramref name="spend"/> falso só lê e pega o baú (o baú que o aviso da Twitch disse que apareceu).
+    /// <paramref name="claimId"/> é o id do baú que veio no aviso: a consulta nem sempre mostra o baú (availableClaim
+    /// vem vazio), e aí ele vai com o id do aviso.
     /// </summary>
-    public string TwitchScript(string api, string channel, string token, string? device, KickReward? reward, bool claim, bool spend = true)
+    public string TwitchScript(string api, string channel, string token, string? device, KickReward? reward, bool claim, bool spend = true,
+                               string? claimId = null)
     {
         var (canSpend, refund) = Plan(channel);
         spend = spend && canSpend;
@@ -311,7 +314,7 @@ internal sealed class PointsRedeemer
         claim = claim && (c is null || DateTime.Now >= c.ClaimRetryAt);
         var args = JsonSerializer.Serialize(new
         {
-            api, channel, token, device, clientId = TwitchClientId, word = reward is KickReward r ? Word(r) : null, spend, refund, claim,
+            api, channel, token, device, clientId = TwitchClientId, word = reward is KickReward r ? Word(r) : null, spend, refund, claim, claimId,
         });
         return "(async a => {" + TwitchGql +
                " try {" +
@@ -324,9 +327,10 @@ internal sealed class PointsRedeemer
                "  const cp = user.channel.self?.communityPoints;" +
                "  if (typeof cp?.balance !== 'number') return { ...ids, error: 'saldo: sem os pontos na resposta (login da Twitch?)' };" +
                "  let points = cp.balance; const out = { points, ...ids };" +
-               "  if (a.claim && cp.availableClaim?.id) {" +
+               "  const claimId = cp.availableClaim?.id || a.claimId;" +
+               "  if (a.claim && claimId) {" +
                "   const k = await gql('mutation($i:ClaimCommunityPointsInput!){claimCommunityPoints(input:$i){claim{id} currentPoints error{code}}}'," +
-               "    { i: { channelID: user.id, claimID: cp.availableClaim.id } });" +
+               "    { i: { channelID: user.id, claimID: claimId } });" +
                "   const p = k?.data?.claimCommunityPoints;" +
                "   if (p && !p.error && !k.errors) { out.claimed = true; points = typeof p.currentPoints === 'number' ? p.currentPoints : points + 50; }" +
                "   else out.claimError = fail(k, p);" +

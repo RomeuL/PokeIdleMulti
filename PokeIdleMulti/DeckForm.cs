@@ -2220,8 +2220,11 @@ internal sealed class DeckForm : Form
                     if (token is null)
                         return;
                     var reward = _config.RedeemTwitch[index];
+                    // O id do baú vem no aviso: a consulta de dentro da página nem sempre mostra o baú.
+                    string? claimId = message.TryGetProperty("data", out var d) && d.TryGetProperty("claim", out var c)
+                                      && c.TryGetProperty("id", out var cid) ? cid.GetString() : null;
                     var results = await window.EvalLivesAsync(LiveSite.Twitch,
-                        ch => redeemer.TwitchScript(TwitchApi, ch, token, device, reward, claim: true, spend: false), channel);
+                        ch => redeemer.TwitchScript(TwitchApi, ch, token, device, reward, claim: true, spend: false, claimId: claimId), channel);
                     if (results.Count == 0)
                         LogTwitchProblem(index, channel, "o baú apareceu, mas o player não abriu");
                     foreach (var (live, result) in results)
@@ -3734,7 +3737,8 @@ internal sealed class DeckForm : Form
                         balance = new { channel_id = "id-tftoddy", balance },
                     },
                 };
-                _fakeTwitchClaims.Add("tftoddy");
+                // Como na Twitch de verdade: a consulta não mostra o baú que o aviso deu, e ele vai com o id do aviso.
+                _fakeTwitchClaims.Remove("tftoddy");
                 _fakeTwitch.Clear();
                 await fakePubSub.SendAsync(userTopic, new { type = "claim-available", data = new { timestamp = Stamp(), claim = new { id = "bau-tftoddy", channel_id = "id-tftoddy" } } });
                 claimedNow = await WaitFor(() => _fakeTwitch.Contains("baú bau-tftoddy OAuth tok123"), 15);
