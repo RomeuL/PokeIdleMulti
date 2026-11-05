@@ -144,7 +144,7 @@ internal sealed class DeckForm : Form
         {
             var pane = new AccountPane(i)
             {
-                AccountName = _config.AccountNames[i], ReduceMotion = _config.ReduceMotion, Ultra = _config.Ultra,
+                AccountName = _config.AccountNames[i], ReduceMotion = _config.ReduceMotion, Ultra = _config.Ultra, GameFps = _config.GameFps,
                 RestockConfig = _config.Restock[i],
             };
             pane.ShowRestock(null);
@@ -1179,10 +1179,13 @@ internal sealed class DeckForm : Form
     /// <summary>A leitura anterior das métricas do jogo de cada conta (o navegador dá o tempo acumulado; o intervalo é a diferença).</summary>
     private readonly Dictionary<int, (DateTime At, Dictionary<string, double> Metrics)> _gameBefore = new();
 
-    // Quantos canvas a página do jogo tem e quantas animações (CSS ou de script) estão rodando agora.
+    // Quantos canvas a página do jogo tem, quantas animações (CSS ou de script) estão rodando agora e quantos quadros
+    // (requestAnimationFrame) por segundo o jogo teve desde a leitura anterior, com o limite do deck.
     private const string GamePageScript =
-        "(() => `canvas ${document.querySelectorAll('canvas').length}, animações rodando ${document.getAnimations ? " +
-        "document.getAnimations().filter(a => a.playState === 'running').length : '?'}`)()";
+        "(() => { const n = window.__deckFrames ?? 0, at = performance.now(), was = window.__deckFramesAt; window.__deckFramesAt = [n, at];" +
+        " const rate = was && at > was[1] && n >= was[0] ? ((n - was[0]) * 1000 / (at - was[1])).toFixed(1) + '/s' : '?';" +
+        " return `canvas ${document.querySelectorAll('canvas').length}, animações rodando ${document.getAnimations ? " +
+        "document.getAnimations().filter(a => a.playState === 'running').length : '?'}, quadros ${rate} (limite ${window.__deckFps ?? '-'})`; })()";
 
     /// <summary>
     /// Onde o jogo de cada conta gasta CPU, para saber se limitar os quadros ajuda (item 7 do plano de consumo): o tempo da
@@ -1289,6 +1292,31 @@ internal sealed class DeckForm : Form
         };
         motion.Click += async (_, _) => await SetReduceMotionAsync(!_config.ReduceMotion);
         items.Add(motion);
+        static string FpsText(int fps) => fps >= 60 ? "60 por segundo (sem limite)" : $"{fps} por segundo";
+        var frames = new ToolStripMenuItem($"🎞 Quadros do mapa: {FpsText(_config.GameFps)}")
+        {
+            ToolTipText = "Quantas vezes por segundo o mapa da caça é desenhado. A caça roda no servidor: menos quadros só " +
+                          "deixam o mapa menos fluido, e gastam bem menos CPU e placa de vídeo",
+        };
+        foreach (int fps in new[] { 60, 30, 15, 10 })
+        {
+            var choice = new ToolStripMenuItem(FpsText(fps)) { Checked = _config.GameFps == fps };
+            choice.Click += async (_, _) => await SetGameFpsAsync(fps);
+            frames.DropDownItems.Add(choice);
+        }
+        items.Add(frames);
+    }
+
+    /// <summary>Troca o limite de quadros do jogo em todas as contas, na hora (sem recarregar).</summary>
+    private async Task SetGameFpsAsync(int fps)
+    {
+        _config.GameFps = fps;
+        SaveConfig();
+        foreach (var pane in _panes)
+        {
+            pane.GameFps = fps;
+            await pane.ApplyGameFpsAsync();
+        }
     }
 
     /// <summary>
@@ -2715,6 +2743,34 @@ internal sealed class DeckForm : Form
                 motionStart == "true,true,true,true" && motionOff == "false,false,false,false" && motionOn == "true,true,true,true"
                 && _config.ReduceMotion,
                 $"ao abrir={motionStart} desligado={motionOff} religado={motionOn}");
+
+            // Quadros do mapa: 15 por segundo de fábrica, muda na hora (60 = sem limite), o cancelar continua valendo e o
+            // limite volta sozinho na página recarregada. Um laço de requestAnimationFrame conta os quadros em 2 s.
+            async Task<int> FramesIn2s(AccountPane pane)
+            {
+                await Eval(pane, "window.__gen = (window.__gen || 0) + 1; window.__n = 0;" +
+                                 " (g => { const f = () => { if (window.__gen !== g) return; window.__n++; requestAnimationFrame(f); }; f(); })(window.__gen); 1");
+                await Task.Delay(2000);
+                return int.TryParse(await Eval(pane, "window.__gen++; window.__n"), out int n) ? n : -1;
+            }
+            int framesDefault = await FramesIn2s(_panes[0]);
+            await SetGameFpsAsync(60);
+            int framesFree = await FramesIn2s(_panes[0]);
+            await SetGameFpsAsync(10);
+            int framesTen = await FramesIn2s(_panes[0]);
+            await Eval(_panes[0], "window.__c = 0; cancelAnimationFrame(requestAnimationFrame(() => window.__c++)); 1");
+            await Task.Delay(300);
+            string cancelled = await Eval(_panes[0], "window.__c");
+            _panes[0].Reload();
+            await Task.Delay(500);
+            await WaitFor(() => _panes[0].Status == PaneStatus.Ok, 15);
+            await Task.Delay(500);
+            int framesReloaded = await FramesIn2s(_panes[0]);
+            await SetGameFpsAsync(15);
+            Check("quadros do mapa: 15/s de fábrica, sem limite e 10/s na hora, o cancelar vale e o limite volta na página recarregada",
+                framesDefault is >= 22 and <= 38 && framesFree >= 70 && framesTen is >= 14 and <= 26 && cancelled == "0"
+                && framesReloaded is >= 14 and <= 26 && _config.GameFps == 15,
+                $"15/s={framesDefault} sem limite={framesFree} 10/s={framesTen} cancelado={cancelled} recarregada a 10/s={framesReloaded}");
 
             // ULTRA: o botão liga em todas pelo interruptor das Configurações do jogo e desliga pelo "Voltar ao
             // jogo" da caixa, na hora; fora do jogo (a 4ª, no portal) só guarda a escolha. Ligado, a conta que

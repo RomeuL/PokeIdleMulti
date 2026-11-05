@@ -218,6 +218,9 @@ internal sealed class AccountPane : UserControl
         await core.AddScriptToExecuteOnDocumentCreatedAsync(KeyScript);
         await core.AddScriptToExecuteOnDocumentCreatedAsync(Echo.CaptureScript);
         await core.AddScriptToExecuteOnDocumentCreatedAsync(Restock.Script);
+        await core.AddScriptToExecuteOnDocumentCreatedAsync(FrameLimitScript);
+        _fpsScript = null;
+        await ApplyGameFpsAsync();
         await ApplyReduceMotionAsync();
 
         setup?.Invoke(core);
@@ -230,6 +233,65 @@ internal sealed class AccountPane : UserControl
     {
         StartedAt = null;
         Core?.Reload();
+    }
+
+    /// <summary>
+    /// O limite de quadros do jogo: troca o requestAnimationFrame da página (só a de cima, não os iframes) por um que
+    /// espera o próximo quadro permitido com um relógio, sem acordar a cada quadro da tela. O limite é lido a cada
+    /// pedido em window.__deckFps (0 ou 60+: sem limite), então muda na hora. window.__deckFrames conta os quadros
+    /// entregues (o consumo.log e o autoteste leem).
+    /// </summary>
+    private const string FrameLimitScript =
+        "(() => {" +
+        " if (window !== window.top || window.__deckFrameLimit) return;" +
+        " window.__deckFrameLimit = true; window.__deckFrames = 0;" +
+        " const raf = window.requestAnimationFrame.bind(window), caf = window.cancelAnimationFrame.bind(window);" +
+        " const pending = new Map(); let next = 1, due = 0, last = -1;" +
+        " const limit = () => { const fps = +window.__deckFps || 0; return fps > 0 && fps < 60 ? fps : 0; };" +
+        // Os pedidos do mesmo quadro recebem o mesmo t e passam juntos; o próximo quadro só vem 1/fps depois da entrega
+        // (8 ms a menos, para cair no quadro da tela certo e não no seguinte). Conta do relógio da entrega, não do t: o
+        // Chrome às vezes entrega com o t de um quadro que começou antes do relógio, e aí passaria um quadro a mais.
+        " const frame = (id, cb) => raf(t => {" +
+        "  if (!pending.delete(id)) return;" +
+        "  const fps = limit(); if (fps && t !== last) { last = t; due = performance.now() + 1000 / fps - 8; }" +
+        "  window.__deckFrames++; cb(t);" +
+        " });" +
+        " window.requestAnimationFrame = cb => {" +
+        "  const id = next++, entry = {}; pending.set(id, entry);" +
+        "  const wait = limit() ? due - performance.now() : 0;" +
+        "  if (wait > 1) entry.timer = setTimeout(() => { if (pending.has(id)) entry.frame = frame(id, cb); }, wait);" +
+        "  else entry.frame = frame(id, cb);" +
+        "  return id;" +
+        " };" +
+        " window.cancelAnimationFrame = id => {" +
+        "  const entry = pending.get(id); if (!entry) return;" +
+        "  pending.delete(id); clearTimeout(entry.timer); if (entry.frame) caf(entry.frame);" +
+        " };" +
+        "})();";
+
+    /// <summary>Quadros por segundo do jogo (60: sem limite). Mudou depois, chame <see cref="ApplyGameFpsAsync"/>.</summary>
+    public int GameFps { get; set; } = 60;
+
+    // O script que põe o limite nas páginas novas (trocado a cada mudança).
+    private string? _fpsScript;
+
+    /// <summary>Aplica o <see cref="GameFps"/> na página aberta, na hora, e nas que abrirem depois (recarregar).</summary>
+    public async Task ApplyGameFpsAsync()
+    {
+        if (Core is not CoreWebView2 core)
+            return;
+        string set = $"window.__deckFps = {GameFps};";
+        try
+        {
+            if (_fpsScript is not null)
+                core.RemoveScriptToExecuteOnDocumentCreated(_fpsScript);
+            _fpsScript = await core.AddScriptToExecuteOnDocumentCreatedAsync(set);
+            await core.ExecuteScriptAsync(set);
+        }
+        catch
+        {
+            // A página está fechando: na próxima abertura ela volta a ler a escolha.
+        }
     }
 
     /// <summary>Menos animações (lido ao criar o navegador da conta; mudou depois, chame <see cref="ApplyReduceMotionAsync"/>).</summary>
