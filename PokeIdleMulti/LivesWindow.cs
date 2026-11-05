@@ -55,7 +55,15 @@ internal sealed class LivesWindow : Form
     /// </summary>
     private sealed class Page
     {
-        public required WebView2 View { get; init; }
+        /// <summary>
+        /// O navegador da vaga: só existe com uma live aberta nela (e, no player parado da Twitch leve, só enquanto ele
+        /// está aberto para uma ação). Vaga em branco não tem navegador: em about:blank cada uma ainda gastava um
+        /// processo de ~20–25 MB.
+        /// </summary>
+        public WebView2? View { get; set; }
+
+        /// <summary>O navegador da vaga sendo criado (os pedidos que chegam juntos esperam o mesmo).</summary>
+        public Task<CoreWebView2?>? Starting { get; set; }
 
         /// <summary>O pedaço da janela onde a página aparece (a da Kick passa dele para a esquerda).</summary>
         public required Panel Frame { get; init; }
@@ -219,7 +227,10 @@ internal sealed class LivesWindow : Form
 
     /// <summary>O endereço que cada página de <paramref name="site"/> tem carregado de verdade (autoteste).</summary>
     public IEnumerable<string> Sources(LiveSite site) => _pages
-        .Where(p => p.Site == site && p.Url is not null).Select(p => p.View.CoreWebView2?.Source ?? "");
+        .Where(p => p.Site == site && p.Url is not null).Select(p => p.View is null ? "sem navegador" : p.View.CoreWebView2?.Source ?? "");
+
+    /// <summary>Quantas vagas de <paramref name="site"/> têm navegador agora (autoteste).</summary>
+    public int Browsers(LiveSite site) => _pages.Count(p => p.Site == site && p.View is not null);
 
     private readonly System.Windows.Forms.Timer _sleep = new() { Interval = 1000 };
 
@@ -230,7 +241,7 @@ internal sealed class LivesWindow : Form
     {
         try
         {
-            if (page.View.CoreWebView2 is not CoreWebView2 core || page.Url is not string url)
+            if (page.Url is not string url || await EnsureViewAsync(page) is not CoreWebView2 core)
                 return false;
             var done = new TaskCompletionSource<bool>();
             void Completed(object? sender, CoreWebView2NavigationCompletedEventArgs e)
@@ -249,7 +260,7 @@ internal sealed class LivesWindow : Form
                 if (ok && WakeSettle > TimeSpan.Zero)
                     await Task.Delay(WakeSettle);
                 // A vaga pode ter mudado (live saiu do ar) enquanto abria.
-                page.Awake = ok && page.Url == url && !IsDisposed && core.Source != "about:blank";
+                page.Awake = ok && page.Url == url && !IsDisposed && page.View?.CoreWebView2 == core && core.Source != "about:blank";
             }
             finally
             {
@@ -268,19 +279,18 @@ internal sealed class LivesWindow : Form
         }
     }
 
-    /// <summary>A cada segundo: o player da Twitch leve sem ação há <see cref="IdleClose"/> volta para o branco.</summary>
+    /// <summary>A cada segundo: o player da Twitch leve sem ação há <see cref="IdleClose"/> fecha o navegador.</summary>
     private void SleepIdle()
     {
         foreach (var page in _pages.Where(p => p.Awake && p.Busy == 0 && p.Waking is null && OnDemand(p)
-                                              && DateTime.Now - p.UsedAt >= IdleClose))
-        {
-            page.Awake = false;
-            page.View.CoreWebView2?.Navigate("about:blank");
-        }
+                                              && DateTime.Now - p.UsedAt >= IdleClose).ToList())
+            DropView(page);
     }
 
     public int Count => _pages.Count(p => p.Url is not null);
-    public int Loaded => _pages.Count(p => p.Url is not null && p.Loaded);
+
+    /// <summary>As lives carregadas (o player parado da Twitch leve conta: ele abre na hora da ação).</summary>
+    public int Loaded => _pages.Count(p => p.Url is not null && (p.Loaded || OnDemand(p)));
 
     /// <summary>Os canais de <paramref name="site"/> abertos agora.</summary>
     public IEnumerable<string> Channels(LiveSite site) => _pages.Where(p => p.Site == site).Select(p => p.Channel).OfType<string>();
@@ -349,7 +359,9 @@ internal sealed class LivesWindow : Form
     {
         try
         {
-            var script = page.View.ExecuteScriptAsync(PlayScript);
+            if (page.View is not WebView2 view)
+                return "sem";
+            var script = view.ExecuteScriptAsync(PlayScript);
             if (await Task.WhenAny(script, Task.Delay(ScriptTimeout)) != script)
                 return "travada";
             return JsonSerializer.Deserialize<string>(await script) ?? "sem";
@@ -371,16 +383,16 @@ internal sealed class LivesWindow : Form
         foreach (var page in _pages.Where(p => p.Site == site && p.Channel is not null && (p.Loaded || OnDemand(p))
                                               && (only is null || p.Channel == only)).ToList())
         {
-            if (IsDisposed || page.Channel is not string channel || page.View.CoreWebView2 is not CoreWebView2 core)
-                continue;
             // O player parado da Twitch leve abre para a ação e fica aberto até IdleClose depois da última.
             bool onDemand = OnDemand(page);
+            if (IsDisposed || page.Channel is not string channel || (!onDemand && page.View?.CoreWebView2 is null))
+                continue;
             if (onDemand)
                 page.Busy++;
             string result = "";
             try
             {
-                if (onDemand && !await WakeAsync(page))
+                if ((onDemand && !await WakeAsync(page)) || page.View?.CoreWebView2 is not CoreWebView2 core)
                 {
                     results.Add((channel, ""));
                     continue;
@@ -427,7 +439,7 @@ internal sealed class LivesWindow : Form
     /// canal, por site. <paramref name="lean"/> falso tira os cortes de consumo; <paramref name="cuts0511"/> falso tira só os
     /// de 05/11 (sem DRM e janela pequena fora da tela). Só o teste de consumo mexe neles, para comparar.
     /// </summary>
-    public static async Task<LivesWindow> CreateAsync(CoreWebView2Environment env, string profile, string accountName,
+    public static Task<LivesWindow> CreateAsync(CoreWebView2Environment env, string profile, string accountName,
         IEnumerable<string> urls, int twitchSlots, int kickSlots, Func<LiveSite, string, string> chatUrl, Action<CoreWebView2>? setup,
         bool lean = true, bool cuts0511 = true)
     {
@@ -437,15 +449,16 @@ internal sealed class LivesWindow : Form
         };
         window.Park();
         window.Show();
+        // O navegador de cada página é criado quando ela recebe um endereço (Navigate), não aqui.
         foreach (var url in urls)
-            window.Navigate(await window.AddPageAsync(null), url, null);
+            window.Navigate(window.AddPage(null), url, null);
         for (int i = 0; i < twitchSlots; i++)
-            await window.AddPageAsync(LiveSite.Twitch);
+            window.AddPage(LiveSite.Twitch);
         for (int i = 0; i < kickSlots; i++)
-            await window.AddPageAsync(LiveSite.Kick);
+            window.AddPage(LiveSite.Kick);
         if (window._pages.Count > 0)
             window.Select(0);
-        return window;
+        return Task.FromResult(window);
     }
 
     /// <summary>
@@ -515,7 +528,7 @@ internal sealed class LivesWindow : Form
     /// <summary>Onde está cada coluna de <paramref name="site"/> na janela, e a página que aparece nela (autoteste).</summary>
     public IEnumerable<(Rectangle Frame, Rectangle View)> ColumnsOf(LiveSite site) => _pages
         .Where(p => p.Site == site && p.Url is not null)
-        .Select(p => (p.Frame.Bounds, (p.Chat ?? p.View).Bounds));
+        .Select(p => (p.Frame.Bounds, (p.Chat ?? p.View)?.Bounds ?? new Rectangle(Point.Empty, p.Frame.ClientSize)));
 
     public IEnumerable<(Rectangle Frame, Rectangle View)> KickLayout => ColumnsOf(LiveSite.Kick);
 
@@ -543,8 +556,8 @@ internal sealed class LivesWindow : Form
     public async Task<List<string>> EvalAsync(string script)
     {
         var results = new List<string>();
-        foreach (var page in _pages.Where(p => p.Url is not null))
-            results.Add(await page.View.ExecuteScriptAsync(script));
+        foreach (var page in _pages.Where(p => p.Url is not null && p.View?.CoreWebView2 is not null))
+            results.Add(await page.View!.ExecuteScriptAsync(script));
         return results;
     }
 
@@ -585,17 +598,16 @@ internal sealed class LivesWindow : Form
         foreach (var page in _pages)
         {
             page.Chat?.Dispose();
-            page.View.Dispose();
+            page.View?.Dispose();
         }
         base.OnFormClosed(e);
     }
 
-    private async Task<Page> AddPageAsync(LiveSite? site)
+    /// <summary>Uma vaga (ou página fixa) ainda sem navegador: ele é criado quando ela recebe um endereço.</summary>
+    private Page AddPage(LiveSite? site)
     {
-        var view = new WebView2 { Dock = DockStyle.Fill, DefaultBackgroundColor = Theme.Back };
         var frame = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Back };
-        frame.Controls.Add(view);
-        var page = new Page { View = view, Frame = frame, Site = site, Button = new ToolStripButton { Visible = false } };
+        var page = new Page { Frame = frame, Site = site, Button = new ToolStripButton { Visible = false } };
         int tab = _pages.Count;
         page.Button.Click += (_, _) => Select(tab);
         if (page.Site is not null)
@@ -603,19 +615,97 @@ internal sealed class LivesWindow : Form
         _pages.Add(page);
         _bar.Items.Insert(_bar.Items.IndexOf(_next), page.Button);
         _stack.Controls.Add(frame);
-
-        var core = await StartAsync(view);
-        core.NavigationCompleted += (_, e) => page.Loaded = e.IsSuccess && page.Url is not null;
-        // A página morreu (no notebook, por falta de memória): abre de novo na hora, sem esperar a conferência.
-        core.ProcessFailed += (_, e) =>
-        {
-            if (e.ProcessFailedKind == CoreWebView2ProcessFailedKind.RenderProcessExited && page.Url is not null && !IsDisposed)
-            {
-                page.Reloads++;
-                Navigate(page, page.Url, page.Channel);
-            }
-        };
         return page;
+    }
+
+    /// <summary>O navegador da página, criando se ainda não tem (null: não deu, ou ela ficou em branco enquanto criava).</summary>
+    private Task<CoreWebView2?> EnsureViewAsync(Page page)
+    {
+        if (page.View?.CoreWebView2 is CoreWebView2 core)
+            return Task.FromResult<CoreWebView2?>(core);
+        if (page.Starting is not { IsCompleted: false })
+            page.Starting = StartViewAsync(page);
+        return page.Starting;
+    }
+
+    private async Task<CoreWebView2?> StartViewAsync(Page page)
+    {
+        DropView(page);
+        var view = new WebView2 { Dock = DockStyle.Fill, DefaultBackgroundColor = Theme.Back };
+        page.View = view;
+        page.Frame.Controls.Add(view);
+        // O chat dos pontos, se estiver aberto, fica por cima do player.
+        view.SendToBack();
+        try
+        {
+            var core = await StartAsync(view);
+            // A vaga ficou em branco (ou a janela fechou) enquanto o navegador abria.
+            if (page.View != view || IsDisposed)
+            {
+                view.Dispose();
+                return null;
+            }
+            core.NavigationCompleted += (_, e) =>
+            {
+                if (page.View == view)
+                    page.Loaded = e.IsSuccess && page.Url is not null;
+            };
+            // A página morreu (no notebook, por falta de memória): abre de novo na hora, sem esperar a conferência.
+            core.ProcessFailed += (_, e) =>
+            {
+                if (e.ProcessFailedKind == CoreWebView2ProcessFailedKind.RenderProcessExited && page.View == view
+                    && page.Url is not null && !IsDisposed)
+                {
+                    page.Reloads++;
+                    Navigate(page, page.Url, page.Channel);
+                }
+            };
+            return core;
+        }
+        catch
+        {
+            // O navegador não abriu: a vaga fica sem, e a próxima conferência (ou ação) tenta de novo.
+            if (page.View == view)
+            {
+                page.View = null;
+                page.Frame.Controls.Remove(view);
+            }
+            view.Dispose();
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Fecha o navegador da página (a vaga ficou em branco, ou o player da Twitch leve voltou a dormir). O que ainda está
+    /// abrindo se fecha sozinho quando terminar de abrir (fechar no meio pode travar a criação).
+    /// </summary>
+    private void DropView(Page page)
+    {
+        var view = page.View;
+        bool starting = page.Starting is { IsCompleted: false };
+        page.View = null;
+        page.Starting = null;
+        page.Loaded = false;
+        page.Awake = false;
+        if (view is null)
+            return;
+        page.Frame.Controls.Remove(view);
+        if (!starting || view.CoreWebView2 is not null)
+            view.Dispose();
+    }
+
+    /// <summary>Abre o endereço na página, criando o navegador se precisar (se a vaga não mudou enquanto ele abria).</summary>
+    private async Task OpenAsync(Page page, string url)
+    {
+        try
+        {
+            if (await EnsureViewAsync(page) is CoreWebView2 core && page.Url == url && !OnDemand(page))
+                core.Navigate(url);
+        }
+        catch (Exception e) when (e is InvalidOperationException or ObjectDisposedException or System.Runtime.InteropServices.COMException)
+        {
+            // A vaga mudou ou a janela fechou no meio: a próxima conferência acerta.
+        }
     }
 
     /// <summary>Liga uma página no perfil da conta, mudo, com o vídeo na menor qualidade e sem propaganda.</summary>
@@ -717,9 +807,12 @@ internal sealed class LivesWindow : Form
         page.Playing = null;
         page.Button.Text = url is null ? "" : TabName(url, page.Site, channel);
         page.Button.Visible = url is not null;
-        // O player parado da Twitch leve fica em branco (sem o processo da Twitch) até uma ação precisar dele.
+        // Vaga em branco fica sem navegador. O player parado da Twitch leve também, até uma ação precisar dele.
         page.Awake = false;
-        page.View.CoreWebView2?.Navigate(url is null || OnDemand(page) ? "about:blank" : url);
+        if (url is null || OnDemand(page))
+            DropView(page);
+        else
+            _ = OpenAsync(page, url);
         // A página do chat segue a vaga: fecha se ela ficou em branco, troca se outra live entrou.
         if (page.Chat is not null && channel is null)
             CloseChat(page);

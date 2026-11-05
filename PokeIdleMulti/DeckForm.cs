@@ -1059,6 +1059,7 @@ internal sealed class DeckForm : Form
             {
                 _usageLogAt = DateTime.Now.AddMinutes(10);
                 LogUsage(total, cores);
+                _ = LogGameAsync();
             }
         }
         catch
@@ -1094,21 +1095,96 @@ internal sealed class DeckForm : Form
     /// Uma linha no consumo.log (pasta do deck), para comparar horas inteiras antes e depois de uma mudança.
     /// Passando de 2 MB (uns 2 meses), o antigo vira consumo.old.log.
     /// </summary>
-    private void LogUsage(long total, double cores)
+    private void LogUsage(long total, double cores) =>
+        AppendUsage(new[]
+        {
+            $"{DateTime.Now:dd/MM/yy HH:mm}  RAM {Gb(total)} GB, CPU {cores:0.00} núcleos | " +
+            string.Join(" | ", Usage.Select(p => $"{p.Name} {p.Bytes / 1024 / 1024} MB {p.Cores:0.00}")),
+        });
+
+    private void AppendUsage(IReadOnlyCollection<string> lines)
     {
+        if (lines.Count == 0)
+            return;
         try
         {
             var file = new FileInfo(UsageLog);
             if (file.Exists && file.Length > 2 * 1024 * 1024)
                 File.Move(file.FullName, Path.ChangeExtension(file.FullName, ".old.log"), true);
-            string line = $"{DateTime.Now:dd/MM/yy HH:mm}  RAM {Gb(total)} GB, CPU {cores:0.00} núcleos | " +
-                          string.Join(" | ", Usage.Select(p => $"{p.Name} {p.Bytes / 1024 / 1024} MB {p.Cores:0.00}"));
-            File.AppendAllText(UsageLog, line + Environment.NewLine);
+            File.AppendAllLines(UsageLog, lines);
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
             // Arquivo aberto em outro programa: vai na próxima.
         }
+    }
+
+    /// <summary>A leitura anterior das métricas do jogo de cada conta (o navegador dá o tempo acumulado; o intervalo é a diferença).</summary>
+    private readonly Dictionary<int, (DateTime At, Dictionary<string, double> Metrics)> _gameBefore = new();
+
+    // Quantos canvas a página do jogo tem e quantas animações (CSS ou de script) estão rodando agora.
+    private const string GamePageScript =
+        "(() => `canvas ${document.querySelectorAll('canvas').length}, animações rodando ${document.getAnimations ? " +
+        "document.getAnimations().filter(a => a.playState === 'running').length : '?'}`)()";
+
+    /// <summary>
+    /// Onde o jogo de cada conta gasta CPU, para saber se limitar os quadros ajuda (item 7 do plano de consumo): o tempo da
+    /// linha principal da página em script, layout, estilo e o resto (pintura, eventos), e a CPU do processo inteiro, em
+    /// núcleos, desde a leitura anterior. Também o tamanho da página (nós, memória do JavaScript, ouvintes), que mostra se
+    /// ela cresce com as horas. Vai para o consumo.log junto com a linha do consumo; a primeira leitura só marca o começo.
+    /// </summary>
+    private async Task LogGameAsync()
+    {
+        if (_gameBusy)
+            return;
+        _gameBusy = true;
+        var lines = new List<string>();
+        for (int i = 0; i < _panes.Length; i++)
+        {
+            try
+            {
+                if (_panes[i]?.Core is not CoreWebView2 core)
+                {
+                    _gameBefore.Remove(i);
+                    continue;
+                }
+                // Ligar de novo não zera os contadores; a página que recarregou volta a contar do zero.
+                await core.CallDevToolsProtocolMethodAsync("Performance.enable", "{}");
+                using var doc = JsonDocument.Parse(await core.CallDevToolsProtocolMethodAsync("Performance.getMetrics", "{}"));
+                var now = new Dictionary<string, double>();
+                foreach (var metric in doc.RootElement.GetProperty("metrics").EnumerateArray())
+                    now[metric.GetProperty("name").GetString() ?? ""] = metric.GetProperty("value").GetDouble();
+                string page = JsonSerializer.Deserialize<string>(await core.ExecuteScriptAsync(GamePageScript)) ?? "";
+                var at = DateTime.Now;
+                if (_gameBefore.TryGetValue(i, out var before) && GameLine(before.Metrics, now, (at - before.At).TotalSeconds) is string cpu)
+                    lines.Add($"{at:dd/MM/yy HH:mm}  jogo de {_config.AccountNames[i]}: {cpu} | {page}");
+                _gameBefore[i] = (at, now);
+            }
+            catch
+            {
+                // A conta desligou ou a página está recarregando: começa de novo na próxima.
+                _gameBefore.Remove(i);
+            }
+        }
+        _gameBusy = false;
+        AppendUsage(lines);
+    }
+
+    private bool _gameBusy;
+
+    /// <summary>A CPU do jogo no intervalo, em núcleos, por tipo de trabalho (null: a página recarregou no meio).</summary>
+    private static string? GameLine(Dictionary<string, double> was, Dictionary<string, double> now, double seconds)
+    {
+        double Delta(string name) => now.GetValueOrDefault(name) - was.GetValueOrDefault(name);
+        double task = Delta("TaskDuration"), script = Delta("ScriptDuration"), layout = Delta("LayoutDuration"), style = Delta("RecalcStyleDuration");
+        if (seconds < 1 || task < 0 || script < 0 || Delta("LayoutCount") < 0)
+            return null;
+        string Cores(double value) => (value / seconds).ToString("0.000");
+        string process = now.ContainsKey("ProcessTime") ? $", processo inteiro {Cores(Delta("ProcessTime"))}" : "";
+        return $"linha principal {Cores(task)} núcleo (script {Cores(script)}, layout {Cores(layout)} " +
+               $"{Delta("LayoutCount") / seconds:0.0}/s, estilo {Cores(style)} {Delta("RecalcStyleCount") / seconds:0.0}/s, " +
+               $"resto {Cores(Math.Max(0, task - script - layout - style))}){process} | nós {now.GetValueOrDefault("Nodes"):0}, " +
+               $"JS {now.GetValueOrDefault("JSHeapUsedSize") / 1024 / 1024:0} MB, ouvintes {now.GetValueOrDefault("JSEventListeners"):0}";
     }
 
     private static string Gb(long bytes) => (bytes / 1024d / 1024 / 1024).ToString("0.0");
@@ -2850,9 +2926,12 @@ internal sealed class DeckForm : Form
             Check("lives da conta 1 carregadas, rodando fora da tela",
                 livesOk && parked && _lives.Skip(1).All(l => l is null),
                 lives0 is null ? "sem janela" : $"{lives0.Loaded}/{lives0.Count} Kick={string.Join(",", lives0.KickChannels)} {lives0.Bounds}");
+            // O player parado da Twitch leve (de fábrica) dorme sem navegador: só as páginas com navegador respondem.
+            int withBrowser = lives0 is null ? -1 : lives0.Browsers(LiveSite.Kick) + lives0.Browsers(LiveSite.Twitch);
             var visibility = lives0 is null ? new List<string>() : await lives0.EvalAsync("document.visibilityState");
             Check("todas as páginas das lives visíveis para o navegador (vídeo de trás toca)",
-                visibility.Count == 3 && visibility.All(v => v == "\"visible\""), string.Join(", ", visibility));
+                lives0?.Browsers(LiveSite.Kick) == 2 && visibility.Count == withBrowser && visibility.All(v => v == "\"visible\""),
+                $"{string.Join(", ", visibility)} (com navegador: {withBrowser}, Twitch {string.Join(",", lives0?.Sources(LiveSite.Twitch) ?? Array.Empty<string>())})");
 
             // Fora da tela só tocam os players, sem página do chat. Nos pontos abre por cima de cada player a
             // página do canal, só com o rodapé do chat (sem as mensagens); fechar fecha essas páginas.
@@ -2906,7 +2985,7 @@ internal sealed class DeckForm : Form
             await Task.Delay(1500);
             var ads = lives0 is null ? new List<string>() : await lives0.EvalAsync("window.__ads");
             Check("lives sem propaganda (anúncio bloqueado; vídeo, Kick e Cloudflare passam)",
-                ads.Count == 3 && ads.All(a => a == "403")
+                ads.Count >= 2 && ads.All(a => a == "403")
                 && AdBlock.Blocked("https://pagead2.googlesyndication.com/x") && AdBlock.Blocked("https://js.stripe.com/v3")
                 && !AdBlock.Blocked("https://kick.com/biscoitao") && !AdBlock.Blocked("https://abc.playback.live-video.net/api/video/v1/x.m3u8")
                 && !AdBlock.Blocked("https://challenges.cloudflare.com/x") && !AdBlock.Blocked("https://notgooglesyndication.com/"),
@@ -3041,10 +3120,12 @@ internal sealed class DeckForm : Form
             CloseLive(0, LiveSite.Kick, null);
             ApplyLives();
             bool none = await WaitFor(() => lives0 is not null && lives0.Count == 1 && !lives0.KickChannels.Any(), 10);
+            int kickBrowsersNone = lives0?.Browsers(LiveSite.Kick) ?? -1;
             Check("kick: fechar todas", none && _config.Kick[0].Slots == 0 && _panes[0].KickState == "fechada", $"Kick={KickNow()}");
             ReopenLive(0, LiveSite.Kick, null);
             bool reopened = await WaitFor(() => lives0 is not null && lives0.Count == 3 && lives0.Loaded == lives0.Count
                 && lives0.KickChannels.Order().SequenceEqual(new[] { "biscoitao", "yetz" }), 15);
+            int kickBrowsersBack = lives0?.Browsers(LiveSite.Kick) ?? -1;
             Check("kick: abrir todas de novo volta às 2 primeiras da lista no ar",
                 reopened && _panes[0].KickState == "ligado" && !_config.Kick[0].Limited,
                 $"Kick={KickNow()} botão={_panes[0].KickState}");
@@ -3055,6 +3136,7 @@ internal sealed class DeckForm : Form
             var twitchMenuBefore = LiveMenuItems(0, LiveSite.Twitch).Select(i => i.Text).ToList();
             CloseLive(0, LiveSite.Twitch, "tftoddy");
             bool twitchShut = await WaitFor(() => lives0 is not null && !lives0.TwitchChannels.Any(), 10);
+            int twitchBrowsersShut = lives0?.Browsers(LiveSite.Twitch) ?? -1;
             UpdateBar();
             string twitchShutState = _panes[0].TwitchState;
             var twitchMenuAfter = LiveMenuItems(0, LiveSite.Twitch).Select(i => i.Text).ToList();
@@ -3070,6 +3152,13 @@ internal sealed class DeckForm : Form
                 && !_config.Twitch[0].Limited,
                 $"antes={twitchBefore} menu={string.Join("|", twitchMenuBefore)} fechou={twitchShut} botão={twitchShutState} " +
                 $"menu depois={string.Join("|", twitchMenuAfter)} ({twitchShutSummary}) voltou={twitchReopened}");
+
+            // Vaga sem live não tem navegador (em about:blank cada uma ainda gastava um processo de ~20–25 MB): a live
+            // que entra cria o dela, e a que sai fecha.
+            int twitchBrowsersBack = lives0?.Browsers(LiveSite.Twitch) ?? -1;
+            Check("vagas vazias sem navegador: a live que entra cria o dela, e a que sai fecha",
+                kickBrowsersNone == 0 && kickBrowsersBack == 2 && twitchBrowsersShut == 0 && twitchBrowsersBack == 1,
+                $"Kick fechadas={kickBrowsersNone} reabertas={kickBrowsersBack}; Twitch fechada={twitchBrowsersShut} reaberta={twitchBrowsersBack}");
 
             // A dica do botão lives tem limite: linhas de até 60 letras (sem isso ela cresce pela tela toda).
             string livesTip = _panes[0].LivesTip;
@@ -3122,6 +3211,22 @@ internal sealed class DeckForm : Form
                 && usageLog.Contains(" | Kick ") && usageLog.Contains(" | Twitch "),
                 string.Join(", ", Usage.Select(p => $"{p.Name} {p.Bytes / 1024 / 1024} MB {p.Cores:0.00} ({p.Processes})")) +
                 $" | contado {counted / 1024 / 1024} MB | barra: {_ram.Text} | log: {usageLog.Trim()}");
+
+            // Onde o jogo gasta: a cada linha do consumo.log vai uma por conta com a CPU da página do jogo separada em
+            // script, layout, estilo e o resto, desde a leitura anterior (a primeira só marca o começo).
+            await WaitFor(() => !_gameBusy, 10);
+            await LogGameAsync();
+            await Task.Delay(1500);
+            await WaitFor(() => !_gameBusy, 10);
+            await LogGameAsync();
+            var gameLines = (File.Exists(UsageLog) ? File.ReadAllLines(UsageLog) : Array.Empty<string>())
+                .Where(l => l.Contains("  jogo de ")).ToList();
+            var activeNames = Enumerable.Range(0, Accounts).Where(i => _panes[i]?.Core is not null).Select(i => _config.AccountNames[i]).ToList();
+            Check("consumo.log: onde o jogo de cada conta gasta (script, layout, estilo e o resto), para decidir o limite de quadros",
+                activeNames.Count > 0 && activeNames.All(n => gameLines.Any(l => l.Contains($"  jogo de {n}: linha principal ")))
+                && gameLines.All(l => l.Contains(" (script ") && l.Contains(", layout ") && l.Contains(", estilo ") && l.Contains(" | nós ")
+                                      && l.Contains(" | canvas ")),
+                $"contas={string.Join(",", activeNames)} | {string.Join(" || ", gameLines.TakeLast(Math.Max(1, activeNames.Count)))}");
 
             // Conferência das lives tocando: a do biscoitao anda (▶); a do yetz fica parada (a 1ª conferência
             // só anota onde o vídeo está) e, depois de duas paradas seguidas, é recarregada (⟳1).
@@ -3567,8 +3672,8 @@ internal sealed class DeckForm : Form
             int wakesBefore = 0;
             if (lightLives is not null && _fakePubSub is FakePubSub lightPubSub)
             {
-                bool Blank() => lightLives.TwitchAwake == 0 && lightLives.Sources(LiveSite.Twitch).Any()
-                                && lightLives.Sources(LiveSite.Twitch).All(s => s == "about:blank");
+                bool Blank() => lightLives.TwitchAwake == 0 && lightLives.Urls(LiveSite.Twitch).Any()
+                                && lightLives.Browsers(LiveSite.Twitch) == 0;
                 blankIdle = await WaitFor(Blank, 10);
                 _fakeTwitch.Clear();
                 wakesBefore = lightLives.Wakes;
