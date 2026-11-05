@@ -26,7 +26,7 @@ internal sealed class BulkRedeemDialog : Form
     // sites: { id, title, prompt, about (a descrição, só para achar o "PokeIdle"), cost, blocked }.
     private const string Pick =
         " const pick = all => a.words.map(w => { const word = new RegExp(w, 'i');" +
-        "  return all.find(r => word.test(r.title) && /pokeidle/i.test(r.title + ' ' + (r.prompt || r.about || ''))) ?? null; });";
+        "  return [...all].sort((x, y) => x.cost - y.cost).find(r => word.test(r.title) && /pokeidle/i.test(r.title + ' ' + (r.prompt || r.about || ''))) ?? null; });";
 
     // A API da Kick com o login da conta (o cookie session_token vai como Bearer), como o site e o resgate automático.
     // get(url) não falha: devolve o status (0: sem resposta) e o JSON quando deu certo.

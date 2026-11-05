@@ -279,7 +279,8 @@ internal sealed class PointsRedeemer
                "  r = await call('/rewards');" +
                "  if (!r.ok) return { points, error: 'bônus: erro ' + r.status };" +
                "  const word = new RegExp(a.word, 'i');" +
-               "  const reward = ((await r.json())?.data || []).find(x => x.is_enabled && word.test(x.title || '')" +
+               // Cada bônus vem em 4 durações (1, 3, 5 e 10 h, com o preço proporcional): vale o mais barato, o de 1 h.
+               "  const reward = ((await r.json())?.data || []).slice().sort((x, y) => x.cost - y.cost).find(x => x.is_enabled && word.test(x.title || '')" +
                "   && /pokeidle/i.test((x.title || '') + ' ' + (x.description || '')));" +
                "  if (!reward) return { points, error: 'canal sem o bônus' };" +
                "  const out = { points, cost: reward.cost, title: reward.title, paused: !!reward.is_paused };" +
@@ -339,7 +340,8 @@ internal sealed class PointsRedeemer
                "  }" +
                "  if (!a.word) return out;" +
                "  const word = new RegExp(a.word, 'i');" +
-               "  const reward = (user.channel.communityPointsSettings?.customRewards || []).find(x => x.isEnabled && word.test(x.title || '')" +
+               // A Twitch lista os bônus fora de ordem, e cada um vem em 4 durações: vale o mais barato, o de 1 h.
+               "  const reward = (user.channel.communityPointsSettings?.customRewards || []).slice().sort((x, y) => x.cost - y.cost).find(x => x.isEnabled && word.test(x.title || '')" +
                "   && /pokeidle/i.test((x.title || '') + ' ' + (x.prompt || '')));" +
                "  if (!reward) return { ...out, error: 'canal sem o bônus' };" +
                "  Object.assign(out, { cost: reward.cost, title: reward.title, paused: reward.isPaused || !reward.isInStock || !!reward.cooldownExpiresAt });" +
@@ -419,12 +421,12 @@ internal sealed class PointsRedeemer
                 {
                     string title = r.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "";
                     string prompt = r.TryGetProperty("prompt", out var p) ? p.GetString() ?? "" : "";
+                    // Cada bônus vem em 4 durações (1, 3, 5 e 10 h), fora de ordem: vale o mais barato, o de 1 h.
                     if (r.TryGetProperty("isEnabled", out var on) && on.ValueKind == JsonValueKind.True && word.IsMatch(title)
-                        && (title + " " + prompt).Contains("pokeidle", StringComparison.OrdinalIgnoreCase))
-                    {
+                        && (title + " " + prompt).Contains("pokeidle", StringComparison.OrdinalIgnoreCase)
+                        && r.TryGetProperty("cost", out var price) && price.TryGetInt32(out int cost)
+                        && (found is not JsonElement best || cost < best.GetProperty("cost").GetInt32()))
                         found = r;
-                        break;
-                    }
                 }
             if (found is not JsonElement bonus)
                 return JsonSerializer.Serialize(new { points, me, channelId, claimId, error = "canal sem o bônus" });

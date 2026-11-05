@@ -420,9 +420,13 @@ internal sealed class DeckForm : Form
             Reply(404, "{\"message\":\"Not Found\"}");
             return;
         }
-        // Os 3 do PokeIdle e um "XP" de outro tipo, que não é o do jogo.
+        // Os 3 do PokeIdle, os de 3 e 10 h antes deles (o deck fica com o de 1 h, o mais barato) e um "XP" de outro
+        // tipo, que não é o do jogo.
         var rewards = new[]
         {
+            (Id: "xp3", Title: "Bônus +15% XP PokeIdle (3h)", Cost: 900, Description: "3 horas de +15% de XP no PokeIdle."),
+            (Id: "lure10", Title: "Bônus de +15% Secret Lure (10h)", Cost: 10000, Description: "10 horas de +15% na chance de shiny no PokeIdle."),
+            (Id: "cap3", Title: "Bônus de +15% Capture Boost (3h)", Cost: 1500, Description: "3 horas de +15% na chance de captura no PokeIdle."),
             (Id: "xp", Title: "Bônus +15% XP PokeIdle", Cost: 300, Description: "1 hora de +15% de XP no PokeIdle."),
             (Id: "cap", Title: "Bônus de +15% Capture Boost", Cost: 500, Description: "1 hora de +15% na chance de captura no PokeIdle."),
             (Id: "lure", Title: "Bônus de +15% Secret Lure", Cost: 1000, Description: "1 hora de +15% na chance de shiny no PokeIdle."),
@@ -618,8 +622,12 @@ internal sealed class DeckForm : Form
     // Os bônus dos canais da Twitch de mentira (os 3 do PokeIdle e um de outro tipo).
     private sealed record FakeReward(string id, string title, string prompt, int cost);
 
+    // Como na Twitch: fora de ordem, com os de 3 e 10 h antes do de 1 h (o deck fica com o mais barato).
     private static readonly FakeReward[] FakeTwitchRewards =
     {
+        new("xp3", "Bônus +15% XP PokeIdle (3h)", "3 horas de +15% de XP no PokeIdle.", 900),
+        new("lure10", "Bônus de +15% Secret Lure (10h)", "10 horas de +15% na chance de shiny no PokeIdle.", 10000),
+        new("cap3", "Bônus de +15% Capture Boost (3h)", "3 horas de +15% na chance de captura no PokeIdle.", 1500),
         new("xp", "Bônus +15% XP PokeIdle", "1 hora de +15% de XP no PokeIdle.", 300),
         new("cap", "Bônus de +15% Capture Boost", "1 hora de +15% na chance de captura no PokeIdle.", 500),
         new("lure", "Bônus de +15% Secret Lure", "1 hora de +15% na chance de shiny no PokeIdle.", 1000),
