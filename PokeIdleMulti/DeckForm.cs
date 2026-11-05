@@ -104,6 +104,8 @@ internal sealed class DeckForm : Form
         _root = selfTest ? Path.Combine(DataRoot, "selftest") : DataRoot;
         _configPath = Path.Combine(_root, "deck.json");
         _config = selfTest ? new DeckConfig() : DeckConfig.Load(_configPath);
+        // O consumo.log só começa 10 min depois de abrir, quando tudo já carregou (no autoteste, na hora).
+        _usageLogAt = selfTest ? DateTime.MinValue : DateTime.Now.AddMinutes(10);
         // O autoteste começa com a conta 4 desligada, como ficaria salvo do uso anterior, e com 1 live da Twitch
         // (mais as 2 da Kick).
         if (selfTest)
@@ -927,7 +929,8 @@ internal sealed class DeckForm : Form
     {
         foreach (var pane in _panes)
             pane.RefreshHeader();
-        if (_seconds++ % 3 == 0)
+        // Medir lista todos os processos do navegador e abre cada um: a cada 10 s basta (e a CPU sai mais estável).
+        if (_seconds++ % 10 == 0)
             _ = UpdateMemoryAsync();
         if (_seconds % 5 == 0)
         {
@@ -955,9 +958,24 @@ internal sealed class DeckForm : Form
         UpdateVotes();
     }
 
+    /// <summary>Uma parte do consumo do deck: a memória privada e a CPU (em núcleos) dos processos dela.</summary>
+    public sealed record UsagePart(string Name, long Bytes, double Cores, int Processes);
+
+    /// <summary>As partes da última medição, na ordem da barra (para o autoteste).</summary>
+    public IReadOnlyList<UsagePart> Usage { get; private set; } = Array.Empty<UsagePart>();
+
+    /// <summary>A CPU já gasta por cada processo na medição anterior: a diferença dá a CPU do intervalo.</summary>
+    private readonly Dictionary<int, TimeSpan> _cpuBefore = new();
+    private readonly Stopwatch _cpuClock = new();
+    /// <summary>A próxima linha do consumo.log: 10 min depois de abrir (o começo é pesado) e depois a cada 10 min.</summary>
+    private DateTime _usageLogAt;
+
+    private string UsageLog => Path.Combine(_root, "consumo.log");
+
     /// <summary>
-    /// A RAM do navegador embutido, separada em o jogo das contas, as lives e o resto (o próprio navegador,
-    /// a placa de vídeo, as extensões). É a memória privada de cada processo, a que pesa no PC.
+    /// O consumo do deck, separado em partes: o jogo das contas, as lives da Kick e da Twitch, a placa de vídeo
+    /// (que desenha o jogo e os vídeos), o resto do navegador (rede, áudio, extensões, DRM) e o próprio deck.
+    /// A memória é a privada de cada processo, a que pesa no PC; a CPU é a do intervalo desde a medição anterior.
     /// </summary>
     private async Task UpdateMemoryAsync()
     {
@@ -966,36 +984,65 @@ internal sealed class DeckForm : Form
         _memoryBusy = true;
         try
         {
-            long game = 0, lives = 0, other = 0;
-            int count = 0;
-            foreach (var info in await _env.GetProcessExtendedInfosAsync())
+            var infos = await _env.GetProcessExtendedInfosAsync();
+            double elapsed = _cpuClock.IsRunning ? _cpuClock.Elapsed.TotalMilliseconds : 0;
+            _cpuClock.Restart();
+            var parts = new[] { "jogo", "Kick", "Twitch", "placa de vídeo", "navegador e resto", "deck" }
+                .ToDictionary(n => n, _ => (Bytes: 0L, Cores: 0d, Processes: 0));
+            var seen = new HashSet<int>();
+
+            void Add(string part, Process process)
             {
-                long bytes;
+                long bytes = process.PrivateMemorySize64;
+                var cpu = process.TotalProcessorTime;
+                // Processo novo (sem leitura anterior) entra só na próxima: senão conta a CPU dele desde que abriu.
+                double cores = elapsed > 0 && _cpuBefore.TryGetValue(process.Id, out var was)
+                    ? Math.Max(0, (cpu - was).TotalMilliseconds / elapsed) : 0;
+                _cpuBefore[process.Id] = cpu;
+                seen.Add(process.Id);
+                var p = parts[part];
+                parts[part] = (p.Bytes + bytes, p.Cores + cores, p.Processes + 1);
+            }
+
+            foreach (var info in infos)
+            {
                 try
                 {
                     using var process = Process.GetProcessById(info.ProcessInfo.ProcessId);
-                    bytes = process.PrivateMemorySize64;
+                    Add(PartOf(info), process);
                 }
-                catch (ArgumentException)
+                catch (Exception e) when (e is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception)
                 {
                     // O processo acabou de fechar.
-                    continue;
                 }
-                count++;
-                // Cada página roda num processo, e um iframe conta para a página que o abriu: o captcha do
-                // Cloudflare na tela de login é do jogo; o da Kick, das lives.
-                var hosts = info.AssociatedFrameInfos.Select(PageHost).ToList();
-                if (hosts.Any(h => h.EndsWith("pokeidle.io")))
-                    game += bytes;
-                else if (hosts.Any(h => h.EndsWith("kick.com") || h.EndsWith("twitch.tv")))
-                    lives += bytes;
-                else
-                    other += bytes;
             }
-            _ram.Text = $"RAM ~{Gb(game + lives + other)} GB: jogo {Gb(game)} · lives {Gb(lives)} · navegador {Gb(other)}";
-            _ram.ToolTipText = $"{count} processos do navegador embutido (memória privada, a que pesa no PC).\n" +
-                               "Para aliviar: feche lives no botão lives do cabeçalho de cada conta, abra menos lives (Lives → Config…), " +
-                               "ou desligue (no canto direito do cabeçalho) as contas que não está usando.";
+            using (var self = Process.GetCurrentProcess())
+                Add("deck", self);
+            foreach (int gone in _cpuBefore.Keys.Where(k => !seen.Contains(k)).ToList())
+                _cpuBefore.Remove(gone);
+
+            Usage = parts.Select(p => new UsagePart(p.Key, p.Value.Bytes, p.Value.Cores, p.Value.Processes)).ToList();
+            long total = Usage.Sum(p => p.Bytes);
+            double cores = Usage.Sum(p => p.Cores);
+            string cpu = elapsed > 0 ? $"CPU ~{cores:0.0} núcleos" : "CPU medindo…";
+            long Bytes(string name) => Usage.First(p => p.Name == name).Bytes;
+            _ram.Text = $"RAM ~{Gb(total)} GB · {cpu}: jogo {Gb(Bytes("jogo"))} · Kick {Gb(Bytes("Kick"))} · " +
+                        $"Twitch {Gb(Bytes("Twitch"))} · vídeo {Gb(Bytes("placa de vídeo"))} · " +
+                        $"resto {Gb(Bytes("navegador e resto") + Bytes("deck"))}";
+            _ram.ToolTipText =
+                string.Join("\n", Usage.Select(p => $"{p.Name}: {p.Bytes / 1024 / 1024} MB, " +
+                                                    (elapsed > 0 ? $"{p.Cores * 100:0}% de um núcleo" : "CPU medindo…") +
+                                                    $" ({p.Processes} {(p.Processes == 1 ? "processo" : "processos")})")) +
+                $"\ntotal: {Gb(total)} GB, {(elapsed > 0 ? $"{cores:0.0} de {Environment.ProcessorCount} núcleos" : "CPU medindo…")}\n" +
+                Theme.Wrap("Memória privada (a que pesa no PC); CPU dos últimos 10 s. A cada 10 min vai uma linha para o " +
+                           "consumo.log, na pasta do deck. Para aliviar: feche lives no botão lives do cabeçalho, abra menos " +
+                           "lives (Lives → Config…) ou desligue as contas que não está usando.", 60, 6);
+
+            if (elapsed > 0 && DateTime.Now >= _usageLogAt)
+            {
+                _usageLogAt = DateTime.Now.AddMinutes(10);
+                LogUsage(total, cores);
+            }
         }
         catch
         {
@@ -1004,6 +1051,46 @@ internal sealed class DeckForm : Form
         finally
         {
             _memoryBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// A parte de um processo do navegador. Cada site roda no seu processo, e um iframe conta para a página que o
+    /// abriu: o captcha do Cloudflare na tela de login é do jogo; o da Kick, das lives da Kick.
+    /// </summary>
+    private static string PartOf(CoreWebView2ProcessExtendedInfo info)
+    {
+        if (info.ProcessInfo.Kind == CoreWebView2ProcessKind.Gpu)
+            return "placa de vídeo";
+        var hosts = info.AssociatedFrameInfos.Select(PageHost).ToList();
+        // deck.test, kick.test e twitch.test são os sites de mentira do autoteste.
+        if (hosts.Any(h => h.EndsWith("pokeidle.io") || h == "deck.test"))
+            return "jogo";
+        if (hosts.Any(h => h.EndsWith("kick.com") || h == "kick.test"))
+            return "Kick";
+        if (hosts.Any(h => h.EndsWith("twitch.tv") || h == "twitch.test"))
+            return "Twitch";
+        return "navegador e resto";
+    }
+
+    /// <summary>
+    /// Uma linha no consumo.log (pasta do deck), para comparar horas inteiras antes e depois de uma mudança.
+    /// Passando de 2 MB (uns 2 meses), o antigo vira consumo.old.log.
+    /// </summary>
+    private void LogUsage(long total, double cores)
+    {
+        try
+        {
+            var file = new FileInfo(UsageLog);
+            if (file.Exists && file.Length > 2 * 1024 * 1024)
+                File.Move(file.FullName, Path.ChangeExtension(file.FullName, ".old.log"), true);
+            string line = $"{DateTime.Now:dd/MM/yy HH:mm}  RAM {Gb(total)} GB, CPU {cores:0.00} núcleos | " +
+                          string.Join(" | ", Usage.Select(p => $"{p.Name} {p.Bytes / 1024 / 1024} MB {p.Cores:0.00}"));
+            File.AppendAllText(UsageLog, line + Environment.NewLine);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            // Arquivo aberto em outro programa: vai na próxima.
         }
     }
 
@@ -2906,6 +2993,39 @@ internal sealed class DeckForm : Form
                 && !livePages.Any(s => s.Contains("game.html")),
                 $"processos com live={liveProcesses.Count} páginas={string.Join(", ", livePages)}");
 
+            // A régua do consumo: cada processo do navegador numa parte (jogo, Kick, Twitch, placa de vídeo, resto),
+            // com a CPU do intervalo; a soma bate com a memória de todos os processos, e vai uma linha ao consumo.log.
+            await WaitFor(() => !_memoryBusy, 5);
+            await UpdateMemoryAsync();
+            await Task.Delay(1500);
+            await WaitFor(() => !_memoryBusy, 5);
+            await UpdateMemoryAsync();
+            await WaitFor(() => Usage.Sum(p => p.Cores) > 0, 25);
+            long counted = 0;
+            if (_env is not null)
+                foreach (var browserProcess in await _env.GetProcessExtendedInfosAsync())
+                    try
+                    {
+                        using var process = Process.GetProcessById(browserProcess.ProcessInfo.ProcessId);
+                        counted += process.PrivateMemorySize64;
+                    }
+                    catch (ArgumentException)
+                    {
+                    }
+            using (var me = Process.GetCurrentProcess())
+                counted += me.PrivateMemorySize64;
+            var usage = Usage.ToDictionary(p => p.Name);
+            long usageTotal = Usage.Sum(p => p.Bytes);
+            string usageLog = File.Exists(UsageLog) ? File.ReadAllText(UsageLog) : "";
+            Check("consumo por parte: jogo, Kick, Twitch e placa de vídeo separados, com CPU, e a soma bate com o total",
+                usage.Count == 6 && usage["jogo"].Processes >= 1 && usage["Kick"].Processes >= 1 && usage["Twitch"].Processes >= 1
+                && usage["placa de vídeo"].Processes >= 1 && usage["deck"].Processes == 1
+                && Usage.Sum(p => p.Cores) > 0 && Math.Abs(usageTotal - counted) < counted * 0.1
+                && _ram.Text.Contains(" Kick ") && _ram.Text.Contains(" Twitch ") && _ram.ToolTipText.Contains("% de um núcleo")
+                && usageLog.Contains(" | Kick ") && usageLog.Contains(" | Twitch "),
+                string.Join(", ", Usage.Select(p => $"{p.Name} {p.Bytes / 1024 / 1024} MB {p.Cores:0.00} ({p.Processes})")) +
+                $" | contado {counted / 1024 / 1024} MB | barra: {_ram.Text} | log: {usageLog.Trim()}");
+
             // Conferência das lives tocando: a do biscoitao anda (▶); a do yetz fica parada (a 1ª conferência
             // só anota onde o vídeo está) e, depois de duas paradas seguidas, é recarregada (⟳1).
             if (lives0 is not null)
@@ -3565,8 +3685,9 @@ internal sealed class DeckForm : Form
             ToggleFullscreen();
             await Task.Delay(800);
             Check("sair da tela cheia volta como estava", Bounds == windowed && FormBorderStyle == FormBorderStyle.Sizable, $"{Bounds} antes {windowed}");
-            Check("RAM na barra separada em jogo, lives e navegador",
-                _ram.Text?.StartsWith("RAM ~") == true && _ram.Text.Contains(" jogo ") && _ram.Text.Contains(" lives "), _ram.Text ?? "");
+            Check("RAM e CPU na barra, separadas por parte",
+                _ram.Text?.StartsWith("RAM ~") == true && _ram.Text.Contains(" CPU ") && _ram.Text.Contains(" jogo ")
+                && _ram.Text.Contains(" Kick "), _ram.Text ?? "");
         }
         catch (Exception ex)
         {
