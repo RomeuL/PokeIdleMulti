@@ -45,6 +45,16 @@ internal sealed class FakePubSub : IDisposable
     public Func<string, string, string, string?>? Points { get; set; }
 
     /// <summary>
+    /// A Kick leve: responde o saldo e os bônus de fora da página (canal, "points" ou "rewards", Authorization → o JSON da
+    /// Kick). O deck liga na Kick de mentira dele, para o saldo ser o mesmo do player.
+    /// </summary>
+    public Func<string, string, string, string?>? KickApi { get; set; }
+
+    /// <summary>Os ids que a Kick de mentira dá ao canal e à live dele (o VOD é "vod-canal").</summary>
+    public static int KickChannelId(string slug) => 1000 + slug.Sum(c => c);
+    public static int KickLivestreamId(string slug) => 5000 + slug.Sum(c => c);
+
+    /// <summary>
     /// Cada pedido da parte web: "página canal", "spade {json}", "info canal", "token canal login", "usher canal sig=…",
     /// "lista canal qualidade", "HEAD /seg/…" (e "GET /seg/…", que a Twitch leve não deve fazer).
     /// </summary>
@@ -87,7 +97,10 @@ internal sealed class FakePubSub : IDisposable
                     continue;
                 }
                 var socket = (await context.AcceptWebSocketAsync(null)).WebSocket;
-                _ = ServeAsync(socket);
+                if (context.Request.Url!.AbsolutePath.StartsWith("/viewer/v1/connect"))
+                    _ = ServeKickAsync(socket, context.Request.QueryString["token"] ?? "");
+                else
+                    _ = ServeAsync(socket);
             }
             catch
             {
@@ -154,6 +167,53 @@ internal sealed class FakePubSub : IDisposable
         }
     }
 
+    /// <summary>
+    /// O websocket de espectador da Kick: anota "kick conectou token", "kick handshake id", "kick assistiu canal live vod",
+    /// "kick ping" e "kick saiu id".
+    /// </summary>
+    private async Task ServeKickAsync(WebSocket socket, string token)
+    {
+        Note($"kick conectou {token}");
+        var buffer = new byte[16 * 1024];
+        try
+        {
+            while (socket.State == WebSocketState.Open)
+            {
+                var part = await socket.ReceiveAsync(buffer, CancellationToken.None);
+                if (part.MessageType == WebSocketMessageType.Close)
+                    break;
+                using var doc = JsonDocument.Parse(Encoding.UTF8.GetString(buffer, 0, part.Count));
+                var root = doc.RootElement;
+                string type = root.GetProperty("type").GetString() ?? "";
+                var message = root.TryGetProperty("data", out var data) && data.TryGetProperty("message", out var m) ? m : default;
+                switch (type)
+                {
+                    case "ping":
+                        Note("kick ping");
+                        await SendAsync(socket, "{\"type\":\"pong\"}");
+                        break;
+                    case "channel_handshake":
+                        Note($"kick handshake {message.GetProperty("channelId")}");
+                        break;
+                    case "channel_disconnect":
+                        Note($"kick saiu {message.GetProperty("channelId")}");
+                        break;
+                    case "user_event":
+                        Note($"kick assistiu {message.GetProperty("name").GetString()} {message.GetProperty("channel_id").GetRawText()} " +
+                             $"{message.GetProperty("livestream_id").GetRawText()} {message.GetProperty("vod_id").GetRawText()}");
+                        break;
+                    default:
+                        Note($"kick {type}");
+                        break;
+                }
+            }
+        }
+        catch
+        {
+            // O deck fechou a conexão.
+        }
+    }
+
     private void Note(string line)
     {
         lock (_web)
@@ -171,7 +231,44 @@ internal sealed class FakePubSub : IDisposable
             string body = request.HasEntityBody ? await new StreamReader(request.InputStream).ReadToEndAsync() : "";
             int status = 200;
             string type = "text/plain", text = "";
-            if (path == "/spade" && request.HttpMethod == "POST")
+            if (path == "/viewer/v1/token")
+            {
+                // O token de espectador da Kick: só com o login da conta e o token do site.
+                string auth = request.Headers["Authorization"] ?? "sem login";
+                bool site = request.Headers["X-CLIENT-TOKEN"] == KickWatcher.ClientToken;
+                Note($"kick token {auth} {(site ? "site ok" : "sem o token do site")}");
+                type = "application/json";
+                if (auth.StartsWith("Bearer ") && site)
+                    text = JsonSerializer.Serialize(new { data = new { token = "vt-" + auth[7..] } });
+                else
+                    status = 401;
+            }
+            else if (path == "/api/internal/settings/global")
+            {
+                type = "application/json";
+                text = "{\"events\":{\"tracking.user.watch.livestream\":{\"interval\":90}}}";
+            }
+            else if (path.StartsWith("/api/v2/channels/") && path.Split('/', StringSplitOptions.RemoveEmptyEntries) is [_, _, _, var slug, var what])
+            {
+                type = "application/json";
+                string auth = request.Headers["Authorization"] ?? "sem login";
+                if (what == "info")
+                {
+                    Note($"kick info {slug} {auth}");
+                    text = JsonSerializer.Serialize(new
+                    {
+                        id = KickChannelId(slug), slug, livestream = new { id = KickLivestreamId(slug), is_live = true, vod_id = "vod-" + slug },
+                    });
+                }
+                else
+                {
+                    Note($"kick {what} {slug} {auth}");
+                    text = KickApi?.Invoke(slug, what, auth) ?? "";
+                    if (text.Length == 0)
+                        status = 404;
+                }
+            }
+            else if (path == "/spade" && request.HttpMethod == "POST")
             {
                 // data=<o evento em JSON, em base64>
                 string data = Uri.UnescapeDataString(body.StartsWith("data=") ? body[5..] : body);

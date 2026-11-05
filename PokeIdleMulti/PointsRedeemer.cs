@@ -446,6 +446,69 @@ internal sealed class PointsRedeemer
     }
 
     /// <summary>
+    /// Na Kick leve, a leitura de 5 em 5 min sem a página: o saldo e o bônus escolhido (o mais barato que casa), pela API
+    /// em <paramref name="api"/> com o login da conta. Devolve o mesmo JSON que o <see cref="KickScript"/> devolveria sem
+    /// resgatar (que <see cref="Apply"/> lê), ou { failed } quando o pedido não passou (aí o deck usa a página, como antes).
+    /// </summary>
+    public static async Task<string> KickReadAsync(string api, string channel, string token, KickReward reward)
+    {
+        static string Failed(string why) => JsonSerializer.Serialize(new { failed = why, error = "saldo: " + why });
+        async Task<(int Status, JsonDocument? Doc)> GetAsync(string path)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, $"{api}/api/v2/channels/{Uri.EscapeDataString(channel)}{path}");
+            request.Headers.TryAddWithoutValidation("User-Agent", UserAgent);
+            request.Headers.TryAddWithoutValidation("Accept", "application/json");
+            request.Headers.TryAddWithoutValidation("x-app-platform", "web");
+            request.Headers.TryAddWithoutValidation("Authorization", "Bearer " + token);
+            using var response = await Http.SendAsync(request);
+            return response.IsSuccessStatusCode
+                ? (200, JsonDocument.Parse(await response.Content.ReadAsStringAsync()))
+                : ((int)response.StatusCode, null);
+        }
+        try
+        {
+            var (status, pointsDoc) = await GetAsync("/points");
+            using (pointsDoc)
+            {
+                if (pointsDoc is null)
+                    return Failed($"erro {status}");
+                if (!pointsDoc.RootElement.TryGetProperty("data", out var data) || !data.TryGetProperty("points", out var p)
+                    || !p.TryGetInt32(out int points))
+                    return Failed("sem os pontos na resposta");
+                var (rewardsStatus, rewardsDoc) = await GetAsync("/rewards");
+                using (rewardsDoc)
+                {
+                    if (rewardsDoc is null)
+                        return JsonSerializer.Serialize(new { points, error = $"bônus: erro {rewardsStatus}" });
+                    var word = new System.Text.RegularExpressions.Regex(Word(reward), System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    // Cada bônus vem em 4 durações (1, 3, 5 e 10 h): vale o mais barato, o de 1 h.
+                    JsonElement? found = null;
+                    if (rewardsDoc.RootElement.TryGetProperty("data", out var list) && list.ValueKind == JsonValueKind.Array)
+                        foreach (var r in list.EnumerateArray())
+                        {
+                            string title = r.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "";
+                            string about = r.TryGetProperty("description", out var d) ? d.GetString() ?? "" : "";
+                            if (r.TryGetProperty("is_enabled", out var on) && on.ValueKind == JsonValueKind.True && word.IsMatch(title)
+                                && (title + " " + about).Contains("pokeidle", StringComparison.OrdinalIgnoreCase)
+                                && r.TryGetProperty("cost", out var price) && price.TryGetInt32(out int cost)
+                                && (found is not JsonElement best || cost < best.GetProperty("cost").GetInt32()))
+                                found = r;
+                        }
+                    if (found is not JsonElement bonus)
+                        return JsonSerializer.Serialize(new { points, error = "canal sem o bônus" });
+                    bool paused = bonus.TryGetProperty("is_paused", out var ip) && ip.ValueKind == JsonValueKind.True;
+                    return JsonSerializer.Serialize(new { points, cost = bonus.GetProperty("cost").GetInt32(), title = bonus.GetProperty("title").GetString(), paused });
+                }
+            }
+        }
+        catch (Exception e) when (e is HttpRequestException or TaskCanceledException or JsonException or InvalidOperationException
+                                      or KeyNotFoundException or FormatException)
+        {
+            return Failed("sem resposta da Kick");
+        }
+    }
+
+    /// <summary>
     /// Na Twitch leve, se a leitura de fora da página (<see cref="TwitchReadAsync"/>) pede a página: o baú esperando
     /// (com o baú ligado e sem espera de 30 min no canal), um resgate que dá agora (as mesmas regras do script), ou a
     /// leitura que não passou.

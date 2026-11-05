@@ -420,30 +420,12 @@ internal sealed class DeckForm : Form
             Reply(404, "{\"message\":\"Not Found\"}");
             return;
         }
-        // Os 3 do PokeIdle, os de 3 e 10 h antes deles (o deck fica com o de 1 h, o mais barato) e um "XP" de outro
-        // tipo, que não é o do jogo.
-        var rewards = new[]
-        {
-            (Id: "xp3", Title: "Bônus +15% XP PokeIdle (3h)", Cost: 900, Description: "3 horas de +15% de XP no PokeIdle."),
-            (Id: "lure10", Title: "Bônus de +15% Secret Lure (10h)", Cost: 10000, Description: "10 horas de +15% na chance de shiny no PokeIdle."),
-            (Id: "cap3", Title: "Bônus de +15% Capture Boost (3h)", Cost: 1500, Description: "3 horas de +15% na chance de captura no PokeIdle."),
-            (Id: "xp", Title: "Bônus +15% XP PokeIdle", Cost: 300, Description: "1 hora de +15% de XP no PokeIdle."),
-            (Id: "cap", Title: "Bônus de +15% Capture Boost", Cost: 500, Description: "1 hora de +15% na chance de captura no PokeIdle."),
-            (Id: "lure", Title: "Bônus de +15% Secret Lure", Cost: 1000, Description: "1 hora de +15% na chance de shiny no PokeIdle."),
-            (Id: "chat", Title: "Dobro de XP no chat", Cost: 100, Description: ""),
-        };
+        var rewards = FakeKickRewards;
         int status = 200;
         string json;
-        if (path[4] == "points")
+        if (path.Length == 5 && FakeKickApi(channel, path[4]) is string read)
         {
-            json = $"{{\"data\":{{\"points\":{_fakePoints.GetValueOrDefault(channel)}}},\"message\":\"OK\"}}";
-        }
-        else if (path.Length == 5 && path[4] == "rewards")
-        {
-            json = JsonSerializer.Serialize(new
-            {
-                data = rewards.Select(r => new { id = r.Id, title = r.Title, cost = r.Cost, description = r.Description, is_enabled = true, is_paused = false }),
-            });
+            json = read;
         }
         else if (path.Length == 7 && path[6] == "redeem" && e.Request.Method == "POST" && rewards.Any(r => r.Id == path[5]))
         {
@@ -467,6 +449,30 @@ internal sealed class DeckForm : Form
         e.Response = _env.CreateWebResourceResponse(new MemoryStream(System.Text.Encoding.UTF8.GetBytes(json)), status,
             status == 200 ? "OK" : "Bad Request", "Content-Type: application/json");
     }
+
+    // Os 3 do PokeIdle, os de 3 e 10 h antes deles (o deck fica com o de 1 h, o mais barato) e um "XP" de outro tipo, que
+    // não é o do jogo.
+    private static readonly (string Id, string Title, int Cost, string Description)[] FakeKickRewards =
+    {
+        ("xp3", "Bônus +15% XP PokeIdle (3h)", 900, "3 horas de +15% de XP no PokeIdle."),
+        ("lure10", "Bônus de +15% Secret Lure (10h)", 10000, "10 horas de +15% na chance de shiny no PokeIdle."),
+        ("cap3", "Bônus de +15% Capture Boost (3h)", 1500, "3 horas de +15% na chance de captura no PokeIdle."),
+        ("xp", "Bônus +15% XP PokeIdle", 300, "1 hora de +15% de XP no PokeIdle."),
+        ("cap", "Bônus de +15% Capture Boost", 500, "1 hora de +15% na chance de captura no PokeIdle."),
+        ("lure", "Bônus de +15% Secret Lure", 1000, "1 hora de +15% na chance de shiny no PokeIdle."),
+        ("chat", "Dobro de XP no chat", 100, ""),
+    };
+
+    /// <summary>O saldo ("points") e os bônus ("rewards") de um canal na Kick de mentira (null: outro pedido).</summary>
+    private string? FakeKickApi(string channel, string what) => what switch
+    {
+        "points" => $"{{\"data\":{{\"points\":{_fakePoints.GetValueOrDefault(channel)}}},\"message\":\"OK\"}}",
+        "rewards" => JsonSerializer.Serialize(new
+        {
+            data = FakeKickRewards.Select(r => new { id = r.Id, title = r.Title, cost = r.Cost, description = r.Description, is_enabled = true, is_paused = false }),
+        }),
+        _ => null,
+    };
 
     // A Twitch de mentira do autoteste: o saldo de cada canal, os canais com baú esperando e cada pedido feito.
     private readonly Dictionary<string, int> _fakeTwitchPoints = new();
@@ -951,6 +957,7 @@ internal sealed class DeckForm : Form
             IEnumerable<string> Played(LiveSite site) => window.Playback(site).Select(k => k.Channel
                 + (k.Playing == true ? " ▶" : k.Playing == false ? " ‖" : "") + (k.Reloads > 0 ? $" ⟳{k.Reloads}" : "")
                 + (site == LiveSite.Twitch && watcher?.Status(k.Channel) is { Length: > 0 } light ? " " + light : "")
+                + (site == LiveSite.Kick && _kickWatchers[index]?.Status(k.Channel) is { Length: > 0 } kickLight ? " " + kickLight : "")
                 + ((site == LiveSite.Kick ? redeem : twitchRedeem)?.Text(k.Channel) is { Length: > 0 } points ? $" ({points})" : ""));
             if (_config.TwitchChannels.Count > 0 && _config.TwitchLives > 0)
                 parts.Add(_twitchLogin[index] == false ? "Twitch: entre na Twitch (Lives → Mostrar)"
@@ -962,7 +969,7 @@ internal sealed class DeckForm : Form
             // Na Twitch leve, quantas vezes o player parado abriu para uma ação (o baú, ~4 por hora em cada live; muito
             // mais que isso é a leitura do saldo de fora da página falhando, e a conferência abrindo o player).
             if (window.Wakes > 0)
-                parts.Add($"player da Twitch abriu {window.Wakes}× desde {window.CreatedAt:HH:mm} (só para o baú e o resgate)");
+                parts.Add($"player leve abriu {window.Wakes}× desde {window.CreatedAt:HH:mm} (só para o baú e os resgates)");
             if (_config.Twitch[index].Limited && _config.Twitch[index].SlotsOf(_config.TwitchLives) > 0)
                 parts.Add("Twitch fechadas no botão lives: " + ShutText(index, LiveSite.Twitch));
             // Os avisos da Twitch (o websocket) fora do ar: o porquê (o login recusado para de vez; o resto tenta de novo).
@@ -1012,7 +1019,10 @@ internal sealed class DeckForm : Form
         if (!_selfTest && !_liveChecking && DateTime.Now >= _liveCheckAt && _lives.Any(l => l is not null))
             _ = CheckLivesAsync();
         if (!_selfTest && _seconds % 30 == 15)
+        {
             _ = WatchLivesAsync();
+            _ = UpdateKickWatchersAsync();
+        }
         if (!_selfTest && !_kickRedeeming && DateTime.Now >= _kickRedeemAt
             && Enumerable.Range(0, Accounts).Any(i => _config.RedeemKick[i] is not null && _lives[i] is not null))
             _ = RedeemKickAsync();
@@ -1163,7 +1173,7 @@ internal sealed class DeckForm : Form
         var wakes = Enumerable.Range(0, Accounts).Where(i => _lives[i] is { Wakes: > 0 })
             .Select(i => $"{_config.AccountNames[i]} {_lives[i]!.Wakes}× ({_lives[i]!.WakeFailures} sem abrir)").ToList();
         if (wakes.Count > 0)
-            lines.Add($"{DateTime.Now:dd/MM/yy HH:mm}  player da Twitch leve abriu: {string.Join(", ", wakes)}");
+            lines.Add($"{DateTime.Now:dd/MM/yy HH:mm}  player leve abriu: {string.Join(", ", wakes)}");
         AppendUsage(lines);
     }
 
@@ -1914,6 +1924,10 @@ internal sealed class DeckForm : Form
         ? $"https://kick.test/kick.html?canal={Uri.EscapeDataString(channel)}"
         : $"https://player.kick.com/{channel}";
 
+    // A live da Kick da conta: na Kick leve, em branco (abre só para resgatar); quem assiste é o deck (KickWatcher).
+    private string KickLiveUrl(int index, string channel) =>
+        _config.KickLight[index] ? KickUrl(channel) + (KickUrl(channel).Contains('?') ? "&" : "?") + TwitchLive.Still : KickUrl(channel);
+
     // A página do chat, com o botão dos pontos, que abre por cima do player só no 💰: na Kick a do canal, na Twitch o
     // chat em janela (bem mais leve que a página do canal, e com o botão dos pontos e o baú).
     private string ChatUrl(LiveSite site, string channel) => (site, _selfTest) switch
@@ -2046,9 +2060,31 @@ internal sealed class DeckForm : Form
                 redeemer.NoLogin = token is null;
                 if (token is null)
                     continue;
+                if (_config.KickLight[i])
+                {
+                    // Kick leve: lê o saldo sem a página; o player em branco só abre para resgatar.
+                    foreach (var channel in window.KickChannels.ToList())
+                    {
+                        string read = await PointsRedeemer.KickReadAsync(KickReadApi, channel, token, reward);
+                        LogKickLight(i, channel, read, true);
+                        if (!redeemer.NeedsPage(channel, read, claim: false))
+                        {
+                            if (redeemer.Apply(channel, read) is string note)
+                                _panes[i].Note(note);
+                            continue;
+                        }
+                        foreach (var (live, result) in await window.EvalLivesAsync(LiveSite.Kick, c => redeemer.KickScript(KickApi, c, token, reward), channel))
+                            if (redeemer.Apply(live, result) is string note)
+                                _panes[i].Note(note);
+                    }
+                    continue;
+                }
                 foreach (var (channel, result) in await window.EvalLivesAsync(LiveSite.Kick, c => redeemer.KickScript(KickApi, c, token, reward)))
+                {
+                    LogKickLight(i, channel, result, false);
                     if (redeemer.Apply(channel, result) is string note)
                         _panes[i].Note(note);
+                }
             }
         }
         finally
@@ -2056,6 +2092,59 @@ internal sealed class DeckForm : Form
             _kickRedeeming = false;
         }
         UpdateBar();
+    }
+
+    // A API da Kick de fora do navegador (a leitura do saldo na Kick leve). No autoteste, o servidor em localhost responde
+    // com o saldo da Kick de mentira do player.
+    private string KickReadApi
+    {
+        get
+        {
+            if (!_selfTest)
+                return "https://kick.com";
+            var fake = _fakePubSub ??= new FakePubSub();
+            fake.KickApi ??= (channel, what, _) => (string?)Invoke(() => FakeKickApi(channel, what));
+            return fake.WebUrl;
+        }
+    }
+
+    /// <summary>
+    /// Enquanto alguma conta está na Kick leve (em teste): o saldo de cada live da Kick em cada conferência, das contas
+    /// leves e das com o player, no kick-leve.log, para comparar os pontos por hora. Nas leves, também o que o deck mandou.
+    /// </summary>
+    private void LogKickLight(int index, string channel, string json, bool light)
+    {
+        if (!_config.KickLight.Any(l => l))
+            return;
+        string points = "?";
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.TryGetProperty("points", out var p))
+                points = p.GetRawText();
+            else if (doc.RootElement.TryGetProperty("error", out var e))
+                points = "? (" + e.GetString() + ")";
+        }
+        catch (JsonException)
+        {
+            points = "? (resposta estranha)";
+        }
+        string sent = light && _kickWatchers[index] is KickWatcher watcher
+            ? $" · {watcher.Status(channel)} · mandou {watcher.Counts(channel).Events} tempos e {watcher.Counts(channel).Handshakes} handshakes, " +
+              $"recebeu {watcher.Counts(channel).Received}"
+            : "";
+        string line = $"{DateTime.Now:dd/MM/yy HH:mm}  {_config.AccountNames[index]} · {channel} · {(light ? "leve" : "player")} · saldo {points}{sent}";
+        try
+        {
+            var path = Path.Combine(_root, "kick-leve.log");
+            if (File.Exists(path) && new FileInfo(path).Length > 1024 * 1024)
+                File.WriteAllLines(path, File.ReadAllLines(path).TakeLast(2000));
+            File.AppendAllText(path, line + Environment.NewLine);
+        }
+        catch (IOException)
+        {
+            // Fica para a próxima.
+        }
     }
 
     // A API da Twitch (no autoteste, a de mentira em twitch.test).
@@ -2221,6 +2310,52 @@ internal sealed class DeckForm : Form
 
     // Quem assiste às lives da Twitch sem player, em cada conta com a Twitch leve.
     private readonly TwitchWatcher?[] _watchers = new TwitchWatcher?[Accounts];
+    private readonly KickWatcher?[] _kickWatchers = new KickWatcher?[Accounts];
+
+    // No autoteste, a Kick de fora do navegador é a de mentira (o mesmo servidor do websocket, em localhost).
+    private KickWatcher.Endpoints KickWatcherEndpoints => _selfTest
+        ? new KickWatcher.Endpoints((_fakePubSub ??= new FakePubSub()).WebUrl, _fakePubSub.WebUrl, _fakePubSub.Url + "viewer/v1/connect")
+        : KickWatcher.Kick;
+
+    /// <summary>
+    /// Na Kick leve, liga (ou mantém) quem assiste às lives da Kick abertas em cada conta, sem player, com o login dela;
+    /// fora dela, sem login ou sem live aberta, desliga. O login mudou: começa de novo com o novo.
+    /// </summary>
+    private async Task UpdateKickWatchersAsync()
+    {
+        for (int i = 0; i < Accounts; i++)
+        {
+            var open = _lives[i]?.KickChannels.ToList() ?? new List<string>();
+            if (!_config.KickLight[i] || open.Count == 0 || await ReadKickTokenAsync(i) is not string token)
+            {
+                StopKickWatcher(i);
+                continue;
+            }
+            if (_kickWatchers[i] is KickWatcher current && current.Token != token)
+                StopKickWatcher(i);
+            var watcher = _kickWatchers[i] ??= NewKickWatcher(token);
+            watcher.SetChannels(open);
+        }
+    }
+
+    /// <summary>Quem assiste na Kick leve (o autoteste encurta os tempos).</summary>
+    private KickWatcher NewKickWatcher(string token)
+    {
+        var watcher = new KickWatcher(KickWatcherEndpoints, token);
+        if (_selfTest)
+        {
+            watcher.Tick = TimeSpan.FromMilliseconds(100);
+            watcher.HandshakeEvery = watcher.PingEvery = TimeSpan.FromSeconds(1);
+            watcher.WatchEvery = TimeSpan.FromSeconds(1);
+        }
+        return watcher;
+    }
+
+    private void StopKickWatcher(int index)
+    {
+        _kickWatchers[index]?.Dispose();
+        _kickWatchers[index] = null;
+    }
 
     // No autoteste, a Twitch de fora do navegador é a de mentira (o mesmo servidor do websocket, em localhost).
     private TwitchWatcher.Endpoints WatcherEndpoints => _selfTest
@@ -2413,7 +2548,7 @@ internal sealed class DeckForm : Form
                 // Sem as fechadas no botão lives da conta, e cada uma levou a vaga dela junto.
                 var kick = _config.Kick[i];
                 var channels = _config.KickChannels.Where(c => !kick.Closed.Contains(c));
-                window.SetLives(LiveSite.Kick, KickLive.Pick(channels, _kickLive, kick.SlotsOf(_config.KickLives)).Select(c => (c, KickUrl(c))).ToList());
+                window.SetLives(LiveSite.Kick, KickLive.Pick(channels, _kickLive, kick.SlotsOf(_config.KickLives)).Select(c => (c, KickLiveUrl(i, c))).ToList());
             }
         }
         UpdateBar();
@@ -2458,6 +2593,7 @@ internal sealed class DeckForm : Form
     {
         StopPubSub(index);
         StopWatcher(index);
+        StopKickWatcher(index);
         _twitchLogin[index] = null;
         if (_lives[index] is LivesWindow window)
         {
@@ -2628,7 +2764,7 @@ internal sealed class DeckForm : Form
     private async Task EditChannelsAsync()
     {
         using var dialog = new ChannelsDialog(_config.TwitchChannels, _config.KickChannels, _config.TwitchLives, _config.KickLives,
-            _config.AccountNames, _config.RedeemKick, _config.RedeemTwitch, _config.ClaimTwitchBonus, _config.TwitchLight);
+            _config.AccountNames, _config.RedeemKick, _config.RedeemTwitch, _config.ClaimTwitchBonus, _config.TwitchLight, _config.KickLight);
         if (dialog.ShowDialog(this) != DialogResult.OK)
             return;
         _config.TwitchChannels = dialog.TwitchChannels;
@@ -2642,6 +2778,7 @@ internal sealed class DeckForm : Form
         _config.RedeemTwitch = dialog.RedeemTwitch;
         _config.ClaimTwitchBonus = dialog.ClaimTwitchBonus;
         _config.TwitchLight = dialog.TwitchLight;
+        _config.KickLight = dialog.KickLight;
         foreach (var redeemer in _redeemKick.Concat(_redeemTwitch))
             redeemer.Restart();
         SaveConfig();
@@ -3980,7 +4117,7 @@ internal sealed class DeckForm : Form
             string wakesSummary = LivesSummary(0);
             Check("Twitch leve sob demanda: o player fica em branco, o saldo é lido sem ele, e ele só abre para o baú e o resgate",
                 blankIdle && readOutside && notWoken && claimWoke && sleptAgain && checkClaim && redeemWoke
-                && wakesSummary.Contains($"player da Twitch abriu {lightLives?.Wakes}× desde "),
+                && wakesSummary.Contains($"player leve abriu {lightLives?.Wakes}× desde "),
                 $"em branco={blankIdle} leu fora={readOutside} não abriu={notWoken} baú pelo aviso={claimWoke} voltou ao branco={sleptAgain} " +
                 $"baú pela conferência={checkClaim} resgate={redeemWoke} aberturas={lightLives?.Wakes - wakesBefore} " +
                 $"páginas={string.Join(",", lightLives?.Sources(LiveSite.Twitch) ?? Array.Empty<string>())} | {wakesSummary} | " +
@@ -3996,6 +4133,65 @@ internal sealed class DeckForm : Form
                 $"parado={still} assistiu={watched} ({_watchers[0]?.Counts("tftoddy")}) sem forçar={notForced} aviso={payload} config={fromPage} " +
                 $"token={tokenWithLogin} menor={lowest} só cabeçalho={headOnly} voltou={lightBack} | {lightSummary} | {spade} | " +
                 string.Join(" | ", webLog.Where(l => !l.StartsWith("HEAD ") && !l.StartsWith("spade ")).Distinct().Take(12)));
+
+            // Kick leve (Lives → Config…, por conta): as lives da Kick da conta 1 ficam em branco (sem navegador), e quem
+            // assiste é o deck, como o player por baixo: o token de espectador com o login da conta (e o token do site), o
+            // websocket com o handshake do canal, o ping e o tempo assistido (o id do canal, o da live e o do VOD, tirados
+            // da info do canal). A conferência lê o saldo sem a página e só abre o player para resgatar. Desligar volta.
+            _config.KickLight[0] = true;
+            ApplyLives();
+            var kickLightLives = _lives[0];
+            bool KickBlank() => kickLightLives is not null && kickLightLives.Urls(LiveSite.Kick).Any()
+                                && kickLightLives.Urls(LiveSite.Kick).All(u => u.EndsWith("&" + TwitchLive.Still))
+                                && kickLightLives.Browsers(LiveSite.Kick) == 0;
+            bool kickBlank = await WaitFor(KickBlank, 15);
+            await UpdateKickWatchersAsync();
+            string kickChannel = kickLightLives?.KickChannels.FirstOrDefault() ?? "";
+            bool kickWatched = await WaitFor(() => _kickWatchers[0]?.Counts(kickChannel) is ( >= 2, >= 2, _), 15);
+            var kickWeb = _fakePubSub?.Web ?? new List<string>();
+            int kickId = FakePubSub.KickChannelId(kickChannel), kickLiveId = FakePubSub.KickLivestreamId(kickChannel);
+            bool kickToken = kickWeb.Contains("kick token Bearer 123|abc site ok") && kickWeb.Contains("kick conectou vt-123|abc");
+            bool kickInfo = kickWeb.Contains($"kick info {kickChannel} Bearer 123|abc");
+            bool kickHandshake = kickWeb.Contains($"kick handshake {kickId}") && kickWeb.Contains("kick ping");
+            bool kickPayload = kickWeb.Contains($"kick assistiu tracking.user.watch.livestream {kickId} {kickLiveId} \"vod-{kickChannel}\"");
+            string kickLightSummary = LivesSummary(0);
+
+            bool kickReadOutside = false, kickNotWoken = false, kickRedeemWoke = false, kickSlept = false;
+            int kickWakesBefore = 0;
+            if (kickLightLives is not null)
+            {
+                var kickRedeemBefore = _config.RedeemKick[0];
+                _config.RedeemKick[0] = KickReward.Capture;
+                _redeemKick[0].Restart();
+                _fakePoints[kickChannel] = 100;
+                _fakeRedeems.Clear();
+                kickWakesBefore = kickLightLives.Wakes;
+                await RedeemKickAsync();
+                var readWeb = _fakePubSub?.Web ?? new List<string>();
+                kickReadOutside = readWeb.Contains($"kick points {kickChannel} Bearer 123|abc") && readWeb.Contains($"kick rewards {kickChannel} Bearer 123|abc");
+                kickNotWoken = kickLightLives.Wakes == kickWakesBefore && _fakeRedeems.Count == 0 && KickBlank();
+                _fakePoints[kickChannel] = 600;
+                await RedeemKickAsync();
+                kickRedeemWoke = _fakeRedeems.Count(l => l.StartsWith($"{kickChannel} cap Bearer 123|abc ")) == 1 && kickLightLives.Wakes == kickWakesBefore + 1
+                                 && _fakePoints[kickChannel] == 100;
+                kickSlept = await WaitFor(KickBlank, 10);
+                _config.RedeemKick[0] = kickRedeemBefore;
+                _redeemKick[0].Restart();
+            }
+
+            _config.KickLight[0] = false;
+            ApplyLives();
+            await UpdateKickWatchersAsync();
+            bool kickBack = await WaitFor(() => kickLightLives is not null && _kickWatchers[0] is null && kickLightLives.Loaded == kickLightLives.Count
+                && kickLightLives.Urls(LiveSite.Kick).Any() && kickLightLives.Urls(LiveSite.Kick).All(u => !u.Contains(TwitchLive.Still)), 15);
+            bool kickSaid = await WaitFor(() => (_fakePubSub?.Web ?? new List<string>()).Contains($"kick saiu {kickId}"), 5);
+            Check("Kick leve: as lives ficam em branco e o deck assiste como o player (token, handshake, ping e tempo assistido); o saldo é lido sem a página, que só abre para resgatar; desligar volta",
+                kickBlank && kickWatched && kickToken && kickInfo && kickHandshake && kickPayload && kickLightSummary.Contains($"{kickChannel} leve ✓")
+                && kickReadOutside && kickNotWoken && kickRedeemWoke && kickSlept && kickBack && kickSaid,
+                $"em branco={kickBlank} assistiu={kickWatched} ({_kickWatchers[0]?.Counts(kickChannel)}) token={kickToken} info={kickInfo} " +
+                $"handshake={kickHandshake} tempo={kickPayload} leu fora={kickReadOutside} não abriu={kickNotWoken} resgate={kickRedeemWoke} " +
+                $"voltou ao branco={kickSlept} desligou={kickBack} saiu={kickSaid} | {kickLightSummary} | " +
+                string.Join(" | ", kickWeb.Where(l => l.StartsWith("kick ")).Distinct().Take(10)));
 
             // deck.json: o de antes (um resgate para todas as contas) vira o mesmo bônus em cada conta; um número fora
             // da lista vira o XP; de fábrica nenhuma conta resgata.

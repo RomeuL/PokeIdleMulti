@@ -106,6 +106,12 @@ internal sealed class DeckConfig
     public bool[] TwitchLight { get; set; } = Enumerable.Repeat(true, Accounts).ToArray();
 
     /// <summary>
+    /// A Kick leve em cada conta (Lives → Config…): o player das lives da Kick fica em branco (abre só para resgatar), e
+    /// quem assiste é o deck, sem navegador (<see cref="KickWatcher"/>). De fábrica desligada: em teste.
+    /// </summary>
+    public bool[] KickLight { get; set; } = new bool[Accounts];
+
+    /// <summary>
     /// Streamers oficiais na Kick, em ordem de prioridade. Abre a live inteira, que é o que rende pontos
     /// do canal, mas só das primeiras que estiverem no ar, até <see cref="KickLives"/> (<see cref="KickLive"/>).
     /// </summary>
@@ -170,6 +176,7 @@ internal sealed class DeckConfig
         config.Muted = Fill(config.Muted, _ => false);
         config.Off = Fill(config.Off, _ => false);
         config.TwitchLight = Fill(config.TwitchLight, _ => true);
+        config.KickLight = Fill(config.KickLight, _ => false);
         config.Kick = Fill(config.Kick, _ => new LiveLimit())
             .Select(k => k is { Closed: not null } ? k : new LiveLimit()).ToArray();
         config.KickLives = Math.Clamp(config.KickLives, 0, KickLive.MaxSlots);
