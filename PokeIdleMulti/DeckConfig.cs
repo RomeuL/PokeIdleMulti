@@ -53,6 +53,12 @@ internal sealed class DeckConfig
     public int GameFps { get; set; } = 15;
 
     /// <summary>
+    /// De quanto em quanto tempo (ms) os sprites animados do jogo (equipe, listas, mercado) trocam de quadro. O jogo usa
+    /// 220; cada conta tem 120–190 deles, e cada troca é uma pintura. 660 corta ~2/3 delas.
+    /// </summary>
+    public int SpriteMs { get; set; } = 660;
+
+    /// <summary>
     /// O Modo ULTRA Economia do jogo em todas as contas (o jogo inteiro fora da tela, só uma caixa de números).
     /// Ligado, a conta que recarrega ou é ligada volta a ele sozinha.
     /// </summary>
@@ -181,6 +187,7 @@ internal sealed class DeckConfig
         config.Restock = Fill(config.Restock, _ => new RestockConfig()).Select(r => (r ?? new RestockConfig()).Normalized()).ToArray();
         config.Focused = Math.Clamp(config.Focused, 0, Accounts - 1);
         config.GameFps = Math.Clamp(config.GameFps, 5, 60);
+        config.SpriteMs = Math.Clamp(config.SpriteMs, 220, 10000);
         config.KickPointsHeight = Math.Clamp(config.KickPointsHeight, 300, 3000);
         config.RedeemKick = Fill(config.RedeemKick, _ => null);
         if (config.KickRedeem == true)

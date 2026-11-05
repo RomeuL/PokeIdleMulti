@@ -219,6 +219,7 @@ internal sealed class AccountPane : UserControl
         await core.AddScriptToExecuteOnDocumentCreatedAsync(Echo.CaptureScript);
         await core.AddScriptToExecuteOnDocumentCreatedAsync(Restock.Script);
         await core.AddScriptToExecuteOnDocumentCreatedAsync(FrameLimitScript);
+        await core.AddScriptToExecuteOnDocumentCreatedAsync(SpriteLimitScript);
         _fpsScript = null;
         await ApplyGameFpsAsync();
         await ApplyReduceMotionAsync();
@@ -269,18 +270,46 @@ internal sealed class AccountPane : UserControl
         " };" +
         "})();";
 
+    /// <summary>
+    /// O ritmo dos sprites animados do jogo: o jogo anima cada um com um setInterval de 220 ms exatos (o único
+    /// setInterval de 220 ms do jogo). O gancho cria esses com o ritmo de window.__deckSpriteMs e, se ele subir
+    /// depois, pula as chamadas até dar o tempo novo (vale na hora). Se descer, só os sprites criados depois (ou a
+    /// página recarregada) pegam o ritmo novo. Nunca para de vez: a chamada é que tira do ar o sprite que saiu da tela.
+    /// window.__deckSpriteTicks conta as trocas de quadro (o consumo.log e o autoteste leem).
+    /// </summary>
+    private const string SpriteLimitScript =
+        "(() => {" +
+        " if (window !== window.top || window.__deckSpriteLimit) return;" +
+        " window.__deckSpriteLimit = true; window.__deckSpriteTicks = 0;" +
+        " const si = window.setInterval.bind(window);" +
+        " const pick = () => Math.max(220, +window.__deckSpriteMs || 220);" +
+        " window.setInterval = function (fn, ms, ...rest) {" +
+        "  if (ms !== 220 || typeof fn !== 'function') return si(fn, ms, ...rest);" +
+        "  const every = pick(); let last = 0;" +
+        "  return si(function () {" +
+        "   const want = pick();" +
+        "   if (want > every + 5) { const now = performance.now(); if (now - last < want - 5) return; last = now; }" +
+        "   window.__deckSpriteTicks++;" +
+        "   return fn.apply(this, arguments);" +
+        "  }, every, ...rest);" +
+        " };" +
+        "})();";
+
     /// <summary>Quadros por segundo do jogo (60: sem limite). Mudou depois, chame <see cref="ApplyGameFpsAsync"/>.</summary>
     public int GameFps { get; set; } = 60;
+
+    /// <summary>O ritmo dos sprites animados, em ms (220: o do jogo). Mudou depois, chame <see cref="ApplyGameFpsAsync"/>.</summary>
+    public int SpriteMs { get; set; } = 220;
 
     // O script que põe o limite nas páginas novas (trocado a cada mudança).
     private string? _fpsScript;
 
-    /// <summary>Aplica o <see cref="GameFps"/> na página aberta, na hora, e nas que abrirem depois (recarregar).</summary>
+    /// <summary>Aplica o <see cref="GameFps"/> e o <see cref="SpriteMs"/> na página aberta, na hora, e nas que abrirem depois (recarregar).</summary>
     public async Task ApplyGameFpsAsync()
     {
         if (Core is not CoreWebView2 core)
             return;
-        string set = $"window.__deckFps = {GameFps};";
+        string set = $"window.__deckFps = {GameFps}; window.__deckSpriteMs = {SpriteMs};";
         try
         {
             if (_fpsScript is not null)

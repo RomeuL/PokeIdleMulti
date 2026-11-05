@@ -144,7 +144,7 @@ internal sealed class DeckForm : Form
         {
             var pane = new AccountPane(i)
             {
-                AccountName = _config.AccountNames[i], ReduceMotion = _config.ReduceMotion, Ultra = _config.Ultra, GameFps = _config.GameFps,
+                AccountName = _config.AccountNames[i], ReduceMotion = _config.ReduceMotion, Ultra = _config.Ultra, GameFps = _config.GameFps, SpriteMs = _config.SpriteMs,
                 RestockConfig = _config.Restock[i],
             };
             pane.ShowRestock(null);
@@ -1190,10 +1190,12 @@ internal sealed class DeckForm : Form
     // Quantos canvas a página do jogo tem, quantas animações (CSS ou de script) estão rodando agora e quantos quadros
     // (requestAnimationFrame) por segundo o jogo teve desde a leitura anterior, com o limite do deck.
     private const string GamePageScript =
-        "(() => { const n = window.__deckFrames ?? 0, at = performance.now(), was = window.__deckFramesAt; window.__deckFramesAt = [n, at];" +
-        " const rate = was && at > was[1] && n >= was[0] ? ((n - was[0]) * 1000 / (at - was[1])).toFixed(1) + '/s' : '?';" +
+        "(() => { const n = window.__deckFrames ?? 0, k = window.__deckSpriteTicks ?? 0, at = performance.now(), was = window.__deckFramesAt;" +
+        " window.__deckFramesAt = [n, at, k];" +
+        " const rate = (now, i) => was && at > was[1] && now >= (was[i] ?? 0) ? ((now - (was[i] ?? 0)) * 1000 / (at - was[1])).toFixed(1) + '/s' : '?';" +
         " return `canvas ${document.querySelectorAll('canvas').length}, animações rodando ${document.getAnimations ? " +
-        "document.getAnimations().filter(a => a.playState === 'running').length : '?'}, quadros ${rate} (limite ${window.__deckFps ?? '-'})`; })()";
+        "document.getAnimations().filter(a => a.playState === 'running').length : '?'}, quadros ${rate(n, 0)} (limite ${window.__deckFps ?? '-'})," +
+        " sprites ${rate(k, 2)} (a cada ${window.__deckSpriteMs ?? '-'} ms)`; })()";
 
     /// <summary>
     /// Onde o jogo de cada conta gasta CPU, para saber se limitar os quadros ajuda (item 7 do plano de consumo): o tempo da
@@ -1313,6 +1315,38 @@ internal sealed class DeckForm : Form
             frames.DropDownItems.Add(choice);
         }
         items.Add(frames);
+        static string SpriteText(int ms) => ms switch
+        {
+            <= 220 => "normal (220 ms, como o jogo)",
+            < 1000 => $"lento ({ms} ms)",
+            < 3000 => $"bem lento ({ms / 1000.0:0.#} s)",
+            _ => $"quase parados ({ms / 1000.0:0.#} s)",
+        };
+        var sprites = new ToolStripMenuItem($"🐾 Sprites animados: {SpriteText(_config.SpriteMs)}")
+        {
+            ToolTipText = "De quanto em quanto tempo os sprites da equipe, das listas e do mercado trocam de quadro. Cada conta " +
+                          "tem 120–190 deles: mais devagar gasta bem menos CPU e placa de vídeo. Mais devagar vale na hora; mais " +
+                          "rápido pega nos sprites novos ou ao recarregar a conta",
+        };
+        foreach (int ms in new[] { 220, 660, 1500, 5000 })
+        {
+            var choice = new ToolStripMenuItem(SpriteText(ms)) { Checked = _config.SpriteMs == ms };
+            choice.Click += async (_, _) => await SetSpriteMsAsync(ms);
+            sprites.DropDownItems.Add(choice);
+        }
+        items.Add(sprites);
+    }
+
+    /// <summary>Troca o ritmo dos sprites animados em todas as contas (mais devagar vale na hora).</summary>
+    private async Task SetSpriteMsAsync(int ms)
+    {
+        _config.SpriteMs = ms;
+        SaveConfig();
+        foreach (var pane in _panes)
+        {
+            pane.SpriteMs = ms;
+            await pane.ApplyGameFpsAsync();
+        }
     }
 
     /// <summary>Troca o limite de quadros do jogo em todas as contas, na hora (sem recarregar).</summary>
@@ -2722,7 +2756,8 @@ internal sealed class DeckForm : Form
         Task<string> Eval(AccountPane pane, string script) => pane.WebView.ExecuteScriptAsync(script);
         bool Shape(int cols, int rows) => _panes.All(p => p.Visible && p.WebView.Height > 100
             && p.Bounds == Cell(_grid.ClientRectangle, p.Index % cols, p.Index / cols, cols, rows));
-        string Detail() => string.Join(" | ", _panes.Select(p => $"{p.Index + 1}:{(p.Visible ? p.Bounds.ToString() : "escondida")}"));
+        string Detail() => string.Join(" | ", _panes.Select(p => $"{p.Index + 1}:{(p.Visible ? p.Bounds.ToString() : "escondida")}"))
+                           + $" | janela {WindowState} grade {_grid.ClientRectangle}";
 
         try
         {
@@ -2779,6 +2814,30 @@ internal sealed class DeckForm : Form
                 framesDefault is >= 22 and <= 38 && framesFree >= 70 && framesTen is >= 14 and <= 26 && cancelled == "0"
                 && framesReloaded is >= 14 and <= 26 && _config.GameFps == 15,
                 $"15/s={framesDefault} sem limite={framesFree} 10/s={framesTen} cancelado={cancelled} recarregada a 10/s={framesReloaded}");
+
+            // Sprites: um setInterval de 220 ms (o dos sprites do jogo) vira 660 ms de fábrica; em 220 volta ao do jogo nos
+            // novos; subir para 1500 vale na hora no que já existe; um setInterval de outro tempo não muda.
+            async Task<int> Ticks(AccountPane pane, int ms, int wait, bool fresh = true)
+            {
+                if (fresh)
+                    await Eval(pane, $"clearInterval(window.__iv); window.__k = 0; window.__iv = setInterval(() => window.__k++, {ms}); 1");
+                else
+                    await Eval(pane, "window.__k = 0; 1");
+                await Task.Delay(wait);
+                return int.TryParse(await Eval(pane, "window.__k"), out int n) ? n : -1;
+            }
+            int spriteDefault = await Ticks(_panes[0], 220, 2000);
+            await SetSpriteMsAsync(220);
+            int spriteGame = await Ticks(_panes[0], 220, 2000);
+            await SetSpriteMsAsync(1500);
+            int spriteSlower = await Ticks(_panes[0], 220, 3100, fresh: false);
+            int otherTimer = await Ticks(_panes[0], 500, 2000);
+            await Eval(_panes[0], "clearInterval(window.__iv); 1");
+            await SetSpriteMsAsync(660);
+            Check("sprites animados: 660 ms de fábrica, 220 volta ao do jogo, mais devagar vale na hora, e os outros relógios não mudam",
+                spriteDefault is >= 2 and <= 4 && spriteGame is >= 7 and <= 10 && spriteSlower is >= 1 and <= 3 && otherTimer is >= 3 and <= 5
+                && _config.SpriteMs == 660,
+                $"660 ms={spriteDefault} em 2 s, 220 ms={spriteGame} em 2 s, 1500 ms no já criado={spriteSlower} em 3,1 s, outro de 500 ms={otherTimer} em 2 s");
 
             // ULTRA: o botão liga em todas pelo interruptor das Configurações do jogo e desliga pelo "Voltar ao
             // jogo" da caixa, na hora; fora do jogo (a 4ª, no portal) só guarda a escolha. Ligado, a conta que
