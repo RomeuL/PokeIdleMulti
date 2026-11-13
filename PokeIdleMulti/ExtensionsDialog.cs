@@ -11,16 +11,10 @@ internal sealed class ExtensionsDialog : Form
     private readonly CoreWebView2Environment _env;
     private readonly string _root;
     private readonly Action _changed;
-    private readonly ComboBox _account = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 220 };
-    private readonly ListView _list = new()
-    {
-        Dock = DockStyle.Fill,
-        View = View.Details,
-        CheckBoxes = true,
-        FullRowSelect = true,
-        HeaderStyle = ColumnHeaderStyle.Nonclickable,
-    };
-    private readonly CheckBox _allAccounts = new() { Text = "Instalar em todas as contas", AutoSize = true, Margin = new Padding(12, 8, 3, 3) };
+    private readonly UiSelect _account = new() { Width = 220 };
+    private readonly UiList _list = new() { CheckBoxes = true, MultiSelect = false, FillLast = true };
+    private readonly UiSwitch _allAccounts = new("Instalar em todas as contas");
+    private readonly ToolTip _tips = Ui.Tips();
     private bool _filling;
 
     public ExtensionsDialog(IReadOnlyList<AccountPane> panes, ExtensionStore store, CoreWebView2Environment env, string root, Action changed)
@@ -32,48 +26,88 @@ internal sealed class ExtensionsDialog : Form
         _changed = changed;
 
         Text = "Extensões das contas";
-        Icon = Theme.AppIcon;
+        Ui.Window(this);
         StartPosition = FormStartPosition.CenterParent;
-        ClientSize = new Size(720, 440);
-        MinimumSize = new Size(600, 320);
+        ClientSize = new Size(736, 460);
+        MinimumSize = new Size(620, 340);
         ShowInTaskbar = false;
-        Padding = new Padding(10);
+        MaximizeBox = MinimizeBox = false;
 
-        _list.Columns.Add("Extensão (marcada = ligada)", 420);
-        _list.Columns.Add("ID", 250);
+        _list.Columns.Add("Extensão (marcada = ligada)", 330);
+        _list.Columns.Add("Versão", 84);
+        _list.Columns.Add("ID", 0);
+        // Os ícones das extensões (24 px de linha, o desenho de 18 no meio).
+        _list.SmallImageList?.Dispose();
+        _list.SmallImageList = new ImageList { ImageSize = new Size(24, 24), ColorDepth = ColorDepth.Depth32Bit };
         _list.ItemChecked += async (_, e) => await SetEnabledAsync(e.Item);
 
         foreach (var pane in panes)
             _account.Items.Add(pane.AccountName);
         _account.SelectedIndexChanged += async (_, _) => await RefreshListAsync();
 
-        var top = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 36 };
-        top.Controls.Add(new Label { Text = "Conta:", AutoSize = true, Margin = new Padding(0, 7, 4, 0) });
+        // Em cima: a conta; o aviso do recarregar fica numa linha amarela.
+        var top = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 30, WrapContents = false };
+        var account = Ui.Label("Conta", muted: true);
+        account.Margin = new Padding(0, 6, 8, 0);
+        top.Controls.Add(account);
+        _account.Margin = Padding.Empty;
         top.Controls.Add(_account);
-        top.Controls.Add(new Label
+        var warn = new Label
         {
-            Text = "Extensão nova só entra na página depois de recarregar a conta (botão ⟳ no cabeçalho dela).",
-            AutoSize = true,
-            ForeColor = Color.DimGray,
-            Margin = new Padding(12, 7, 0, 0),
-        });
+            Dock = DockStyle.Top, Height = 30, ForeColor = Color.FromArgb(243, 214, 107), Font = Ui.Small, UseMnemonic = false,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Text = "⚠  Extensão nova (ou ligada de novo) só entra na página depois de recarregar a conta: ⟳ no cabeçalho dela.",
+        };
 
-        var add = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 40, Padding = new Padding(0, 6, 0, 0) };
-        add.Controls.Add(NewButton("Importar do meu Chrome…", async () => await ImportFromChromeAsync()));
-        add.Controls.Add(NewButton("Da Chrome Web Store…", async () => await FromWebStoreAsync()));
-        add.Controls.Add(NewButton("Pasta descompactada…", async () => await FromFolderAsync()));
-        add.Controls.Add(_allAccounts);
+        // Embaixo da lista: + Adicionar ▾ (Chrome, Web Store, pasta) e o "em todas as contas".
+        var addMenu = new ContextMenuStrip();
+        addMenu.Items.Add("Importar do meu Chrome…", null, async (_, _) => await RunAsync(ImportFromChromeAsync));
+        addMenu.Items.Add("Da Chrome Web Store…", null, async (_, _) => await RunAsync(FromWebStoreAsync));
+        addMenu.Items.Add("Pasta descompactada…", null, async (_, _) => await RunAsync(FromFolderAsync));
+        var add = new UiButton("+ Adicionar ▾", UiLook.Primary);
+        add.Click += (_, _) => addMenu.Show(add, new Point(0, add.Height + 2));
+        add.Location = new Point(0, 4);
+        _allAccounts.Location = new Point(add.Right + 16, 7);
+        var addRow = new Panel { Dock = DockStyle.Bottom, Height = 36 };
+        addRow.Controls.Add(add);
+        addRow.Controls.Add(_allAccounts);
+        _tips.SetToolTip(_allAccounts, "Ligado: a extensão nova entra em todas as contas do deck de uma vez.");
 
-        var manage = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 40, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(0, 6, 0, 0) };
-        manage.Controls.Add(NewButton("Fechar", () => { Close(); return Task.CompletedTask; }));
-        manage.Controls.Add(NewButton("Remover", async () => await RemoveAsync()));
-        manage.Controls.Add(NewButton("Opções", async () => await OpenOptionsAsync()));
-        manage.Controls.Add(NewButton("Trazer configurações…", () => { ImportSettings(); return Task.CompletedTask; }));
+        var close = new UiButton("Fechar", UiLook.Outline);
+        close.Click += (_, _) => Close();
+        CancelButton = close;
+        var footer = new UiFooter(null,
+            NewButton("Trazer configurações…", UiLook.Outline, () => { ImportSettings(); return Task.CompletedTask; }),
+            NewButton("Opções", UiLook.Outline, async () => await OpenOptionsAsync()),
+            NewButton("Remover", UiLook.Danger, async () => await RemoveAsync()),
+            close);
+        _tips.SetToolTip(footer.Controls[0].Controls[0], "Copia as configurações da extensão escolhida de outro lugar (Chrome, IdleDeck ou outra conta) para esta conta.");
 
-        Controls.Add(_list);
-        Controls.Add(manage);
-        Controls.Add(add);
-        Controls.Add(top);
+        var body = new Panel { Dock = DockStyle.Fill, Padding = new Padding(14, 12, 14, 8) };
+        body.Controls.Add(new UiFrame(_list) { Dock = DockStyle.Fill });
+        body.Controls.Add(Ui.Gap(4, DockStyle.Bottom));
+        body.Controls.Add(addRow);
+        body.Controls.Add(warn);
+        body.Controls.Add(top);
+        Controls.Add(body);
+        Controls.Add(footer);
+    }
+
+    protected override bool ProcessDialogKey(Keys keyData)
+    {
+        if (keyData == Keys.Escape)
+        {
+            Close();
+            return true;
+        }
+        return base.ProcessDialogKey(keyData);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+            _tips.Dispose();
+        base.Dispose(disposing);
     }
 
     protected override void OnLoad(EventArgs e)
@@ -85,9 +119,9 @@ internal sealed class ExtensionsDialog : Form
 
     private AccountPane? Selected => _account.SelectedIndex >= 0 ? _panes[_account.SelectedIndex] : null;
 
-    private Button NewButton(string text, Func<Task> action)
+    private UiButton NewButton(string text, UiLook look, Func<Task> action)
     {
-        var button = new Button { Text = text, AutoSize = true, Padding = new Padding(6, 2, 6, 2) };
+        var button = new UiButton(text, look);
         button.Click += async (_, _) => await RunAsync(action);
         return button;
     }
@@ -103,7 +137,7 @@ internal sealed class ExtensionsDialog : Form
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, Explain(ex), Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            DeckBox.Show(this, Explain(ex), Text, DeckBoxIcon.Warn);
         }
         finally
         {
@@ -129,14 +163,31 @@ internal sealed class ExtensionsDialog : Form
                 return;
             foreach (var extension in await profile.GetBrowserExtensionsAsync())
             {
-                var item = new ListViewItem(extension.Name) { Checked = extension.IsEnabled, Tag = extension };
-                item.SubItems.Add(extension.Id);
+                var item = new ListViewItem(extension.Name) { Checked = extension.IsEnabled, Tag = extension, UseItemStyleForSubItems = false };
+                var info = _store.Find(extension.Id);
+                item.SubItems.Add(info is null ? "" : ExtensionStore.VersionOf(info.Folder) ?? "", Ui.Muted, Color.Empty, Ui.Font);
+                item.SubItems.Add(extension.Id, Ui.Muted, Color.Empty, Ui.Small);
+                if (info is not null && _list.SmallImageList is { } images)
+                {
+                    if (!images.Images.ContainsKey(extension.Id) && ExtensionStore.IconOf(info, 18) is Image icon)
+                    {
+                        // No meio de um quadrado de 24, para a linha não crescer.
+                        var cell = new Bitmap(24, 24);
+                        using (var g = Graphics.FromImage(cell))
+                            g.DrawImage(icon, 3, 3, 18, 18);
+                        icon.Dispose();
+                        images.Images.Add(extension.Id, cell);
+                    }
+                    if (images.Images.ContainsKey(extension.Id))
+                        item.ImageKey = extension.Id;
+                }
                 _list.Items.Add(item);
             }
         }
         finally
         {
             _filling = false;
+            _list.FitLastColumn();
         }
     }
 
@@ -161,9 +212,8 @@ internal sealed class ExtensionsDialog : Form
         _changed();
         if (info is not null)
         {
-            MessageBox.Show(this,
-                $"Instalada: {info.Name}\n\nEla entra na página quando a conta for recarregada (botão ⟳ no cabeçalho dela).",
-                Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            DeckBox.Show(this,
+                $"Instalada: {info.Name}\n\nEla entra na página quando a conta for recarregada (botão ⟳ no cabeçalho dela).", Text);
         }
     }
 
@@ -172,37 +222,25 @@ internal sealed class ExtensionsDialog : Form
         var available = ExtensionStore.FindChromeExtensions();
         if (available.Count == 0)
         {
-            MessageBox.Show(this, "Não achei extensões no seu Google Chrome.", Text);
+            DeckBox.Show(this, "Não achei extensões no seu Google Chrome.", Text);
             return;
         }
 
-        using var pick = new Form
-        {
-            Text = "Importar do Chrome",
-            Icon = Theme.AppIcon,
-            StartPosition = FormStartPosition.CenterParent,
-            ClientSize = new Size(420, 360),
-            ShowInTaskbar = false,
-            Padding = new Padding(10),
-        };
-        var list = new CheckedListBox { Dock = DockStyle.Fill, CheckOnClick = true };
+        var list = new UiList { CheckBoxes = true, FillLast = true, HeaderStyle = ColumnHeaderStyle.None };
+        list.Columns.Add("Extensão", 0);
         foreach (var extension in available)
             list.Items.Add(extension.Name);
-        var ok = new Button { Text = "Importar", DialogResult = DialogResult.OK, Dock = DockStyle.Bottom, Height = 32 };
-        pick.Controls.Add(list);
-        pick.Controls.Add(ok);
-        pick.AcceptButton = ok;
-        if (pick.ShowDialog(this) != DialogResult.OK)
+        if (Pick(list, "Importar do Chrome", "Marque as extensões do seu Chrome que vão para a conta.", "Importar", new Size(440, 380)) != DialogResult.OK)
             return;
 
-        foreach (int index in list.CheckedIndices)
+        foreach (int index in list.CheckedIndices.Cast<int>().ToList())
             await InstallAsync(_store.ImportFromChrome(available[index]));
     }
 
     private async Task FromWebStoreAsync()
     {
         var link = Prompt.Ask(this, "Da Chrome Web Store",
-            "Cole o link da extensão na Chrome Web Store (ou só o ID dela):");
+            "Cole o link da extensão na Chrome Web Store (ou só o ID dela):", verb: "Adicionar");
         if (string.IsNullOrWhiteSpace(link))
             return;
         await InstallAsync(await _store.DownloadFromWebStoreAsync(link));
@@ -220,9 +258,8 @@ internal sealed class ExtensionsDialog : Form
     {
         if (_list.SelectedItems.Count == 0 || _list.SelectedItems[0].Tag is not CoreWebView2BrowserExtension extension)
             return;
-        var answer = MessageBox.Show(this, $"Remover \"{extension.Name}\" de {Selected?.AccountName}?", Text,
-            MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-        if (answer != DialogResult.Yes)
+        if (!DeckBox.Confirm(this, $"Remover \"{extension.Name}\" de {Selected?.AccountName}?\n\n" +
+                "As configurações dela nesta conta vão junto.", Text, "Remover", danger: true))
             return;
         await extension.RemoveAsync();
         await _store.CleanupAsync(_panes.Select(p => p.Profile).OfType<CoreWebView2Profile>());
@@ -235,51 +272,40 @@ internal sealed class ExtensionsDialog : Form
     {
         if (_list.SelectedItems.Count == 0 || _list.SelectedItems[0].Tag is not CoreWebView2BrowserExtension extension || Selected is not { } target)
         {
-            MessageBox.Show(this, "Escolha a conta lá em cima e clique na extensão na lista.", Text);
+            DeckBox.Show(this, "Escolha a conta lá em cima e clique na extensão na lista.", Text);
             return;
         }
         var others = _panes.Where(p => p != target).Select(p => (p.ProfileName, p.AccountName)).ToList();
         var sources = StorageImport.FindSources(_root, extension.Id, others);
         if (sources.Count == 0)
         {
-            MessageBox.Show(this, $"Não achei configurações de \"{extension.Name}\" em outro lugar (Chrome, IdleDeck ou outra conta do deck).", Text);
+            DeckBox.Show(this, $"Não achei configurações de \"{extension.Name}\" em outro lugar.\n\nProcurei no Chrome, no IdleDeck e nas outras contas do deck.", Text);
             return;
         }
 
-        using var pick = new Form
-        {
-            Text = $"Trazer configurações para {target.AccountName}",
-            Icon = Theme.AppIcon,
-            StartPosition = FormStartPosition.CenterParent,
-            ClientSize = new Size(520, 300),
-            ShowInTaskbar = false,
-            Padding = new Padding(10),
-        };
-        var list = new ListBox { Dock = DockStyle.Fill, IntegralHeight = false };
+        var list = new UiList { MultiSelect = false, FillLast = true };
+        list.Columns.Add("De onde", 260);
+        list.Columns.Add("Mudou em", 100);
+        list.Columns.Add("Tamanho", 0, HorizontalAlignment.Right);
         foreach (var source in sources)
-            list.Items.Add($"{source.Label}  —  mudou em {source.Changed:dd/MM HH:mm}, {Math.Max(1, source.Size / 1024)} KB");
-        list.SelectedIndex = 0;
-        var hint = new Label
         {
-            Dock = DockStyle.Top,
-            Height = 36,
-            Text = $"De onde vêm as configurações de \"{extension.Name}\"? As que {target.AccountName} tem hoje ficam guardadas num backup.",
-        };
-        var ok = new Button { Text = "Trazer", DialogResult = DialogResult.OK, Dock = DockStyle.Bottom, Height = 32 };
-        pick.Controls.Add(list);
-        pick.Controls.Add(ok);
-        pick.Controls.Add(hint);
-        pick.AcceptButton = ok;
-        if (pick.ShowDialog(this) != DialogResult.OK || list.SelectedIndex < 0)
+            var item = new ListViewItem(source.Label);
+            item.SubItems.Add($"{source.Changed:dd/MM HH:mm}");
+            item.SubItems.Add($"{Math.Max(1, source.Size / 1024)} KB");
+            list.Items.Add(item);
+        }
+        list.Items[0].Selected = true;
+        if (Pick(list, $"Trazer configurações para {target.AccountName}",
+                $"De onde vêm as configurações de \"{extension.Name}\"? As que {target.AccountName} tem hoje ficam guardadas num backup.",
+                "Trazer", new Size(540, 320)) != DialogResult.OK || list.SelectedIndices.Count == 0)
             return;
 
-        var chosen = sources[list.SelectedIndex];
+        var chosen = sources[list.SelectedIndices[0]];
         StorageImport.Queue(_root, new PendingImport(extension.Id, chosen.Folder, chosen.Label, target.ProfileName));
-        MessageBox.Show(this,
+        DeckBox.Show(this,
             $"Combinado: as configurações de \"{extension.Name}\" vindas de {chosen.Label} entram em {target.AccountName} " +
-            "na próxima vez que o deck abrir (com ele aberto, o navegador está usando esses arquivos).\n\n" +
-            "Feche o deck e abra de novo.",
-            Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            "na próxima vez que o deck abrir.\n\n" +
+            "Com ele aberto, o navegador está usando esses arquivos. Feche o deck e abra de novo.", Text);
     }
 
     private async Task OpenOptionsAsync()
@@ -288,12 +314,35 @@ internal sealed class ExtensionsDialog : Form
             return;
         if (_store.Find(extension.Id)?.Options is not string options)
         {
-            MessageBox.Show(this, "Essa extensão não tem página de opções.", Text);
+            DeckBox.Show(this, "Essa extensão não tem página de opções.", Text);
             return;
         }
         var window = await PopupWindow.CreateAsync(_env, Selected.ProfileName, new Size(900, 680), closeOnDeactivate: false);
         window.Location = new Point(Left + 40, Top + 40);
         window.WebView.CoreWebView2.Navigate($"chrome-extension://{extension.Id}/{options}");
         window.Show(Owner);
+    }
+
+    /// <summary>Uma caixinha com um texto em cima, a lista e o botão de confirmar (no tema do deck).</summary>
+    private DialogResult Pick(UiList list, string title, string hint, string verb, Size size)
+    {
+        using var pick = new Form { Text = title };
+        Ui.Dialog(pick);
+        var text = Ui.Label(hint);
+        text.AutoSize = false;
+        text.Dock = DockStyle.Top;
+        text.Height = 40;
+        var ok = new UiButton(verb, UiLook.Primary) { DialogResult = DialogResult.OK };
+        var cancel = new UiButton("Cancelar", UiLook.Outline) { DialogResult = DialogResult.Cancel };
+        var body = new Panel { Dock = DockStyle.Fill, Padding = new Padding(14, 12, 14, 12) };
+        body.Controls.Add(new UiFrame(list) { Dock = DockStyle.Fill });
+        body.Controls.Add(text);
+        pick.Controls.Add(body);
+        pick.Controls.Add(new UiFooter(null, cancel, ok));
+        pick.ClientSize = size;
+        pick.AcceptButton = ok;
+        pick.CancelButton = cancel;
+        list.DoubleClick += (_, _) => pick.DialogResult = DialogResult.OK;
+        return pick.ShowDialog(this);
     }
 }

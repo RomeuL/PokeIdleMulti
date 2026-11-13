@@ -3,37 +3,41 @@ namespace PokeIdleMulti;
 /// <summary>
 /// A recompra de uma conta (o carrinho no cabeçalho dela): ligar, quanto manter de pokebola, revive e poção,
 /// qual poção e o mínimo de ouro. Vale na hora, sem botão de salvar; o estoque e o registro das compras se
-/// atualizam enquanto a janela está aberta.
+/// atualizam enquanto a janela está aberta. Pokébola e Revives lado a lado, Poções embaixo, o registro recolhido.
 /// </summary>
 internal sealed class RestockWindow : Form
 {
-    private const int InfoWidth = 520;
+    private const int W = 720, Pad = 14, Gap = 12, Half = (W - 2 * Pad - Gap) / 2, Full = W - 2 * Pad;
+    private const int LogHeight = 110;
 
     private readonly RestockConfig _config;
-    private readonly CheckBox _on = new() { Text = "Recompra ligada nesta conta", AutoSize = true };
-    private readonly Label _state = Info();
-    private readonly CheckBox _ballsOn = Check("Recomprar");
-    private readonly ComboBox _ball = Combo(220);
-    private readonly NumericUpDown _ballKeep = Number(Restock.MaxStock);
-    private readonly NumericUpDown _ballBelow = Number(Restock.MaxStock);
-    private readonly Label _ballInfo = Info();
-    private readonly CheckBox _revivesOn = Check("Recomprar (sempre o revive mais barato)");
-    private readonly NumericUpDown _reviveKeep = Number(Restock.MaxStock);
-    private readonly NumericUpDown _reviveBelow = Number(Restock.MaxStock);
-    private readonly Label _reviveInfo = Info();
-    private readonly CheckBox _potionsOn = Check("Recomprar");
-    private readonly ComboBox _potion = Combo(330);
-    private readonly NumericUpDown _potionKeep = Number(Restock.MaxStock);
-    private readonly NumericUpDown _potionBelow = Number(Restock.MaxStock);
-    private readonly CheckBox _potionFirst = Check("Pôr a poção escolhida em 1º na fila da automação \"Usar Poções\"");
-    private readonly Label _potionInfo = Info();
-    private readonly NumericUpDown _goldFloor = Number(1_000_000_000_000);
-    private readonly Label _gold = Info();
-    private readonly TextBox _log = new()
-    {
-        Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Width = InfoWidth, Height = 120,
-        Font = new Font(FontFamily.GenericMonospace, 8.5f),
-    };
+    private readonly UiSwitch _on = new("Recompra ligada") { Font = Ui.Bold };
+    private readonly UiPill _state = new("desligada", UiTone.Neutral);
+    private string _stateText = "";
+    private readonly UiSwitch _ballsOn = CardSwitch("Pokébola");
+    private readonly UiSelect _ball = new();
+    private readonly UiStepper _ballKeep = Stock();
+    private readonly UiStepper _ballBelow = Stock();
+    private readonly Label _ballInfo = Corner();
+    private readonly UiSwitch _revivesOn = CardSwitch("Revives");
+    private readonly UiStepper _reviveKeep = Stock();
+    private readonly UiStepper _reviveBelow = Stock();
+    private readonly Label _reviveInfo = Corner();
+    private readonly Label _reviveBuy = Ui.Label("sempre o mais barato", muted: true);
+    private readonly UiSwitch _potionsOn = CardSwitch("Poções");
+    private readonly UiSelect _potion = new();
+    private readonly UiStepper _potionKeep = Stock();
+    private readonly UiStepper _potionBelow = Stock();
+    private readonly UiSwitch _potionFirst = new("Pôr a poção escolhida em 1º na fila da automação \"Usar Poções\"");
+    private readonly Label _potionHave = Corner();
+    private readonly Label _potionInfo = new() { AutoSize = false, ForeColor = Ui.Muted, Font = Ui.Small, UseMnemonic = false };
+    private readonly UiStepper _goldFloor = new() { Maximum = 1_000_000_000_000, Thousands = true, Increment = 100_000, Width = 170 };
+    private readonly Label _gold = Ui.Label("", muted: true);
+    private readonly Label _logToggle = Ui.Label("▸ Registro", muted: true);
+    private readonly UiPill _logCount = new("0", UiTone.Neutral);
+    private readonly UiField _log = new(multiline: true) { Visible = false };
+    private readonly ToolTip _tips = Ui.Tips(30000);
+    private readonly int _collapsedHeight;
     private bool _loading;
 
     /// <summary>A configuração mudou (o deck salva e manda para a página).</summary>
@@ -48,50 +52,76 @@ internal sealed class RestockWindow : Form
     {
         _config = config;
         Text = $"Recompra · {account}";
-        Icon = Theme.AppIcon;
-        FormBorderStyle = FormBorderStyle.FixedDialog;
-        MaximizeBox = MinimizeBox = false;
-        ShowInTaskbar = false;
-        StartPosition = FormStartPosition.Manual;
+        Ui.Dialog(this);
         AutoScaleDimensions = new SizeF(96F, 96F);
         AutoScaleMode = AutoScaleMode.Dpi;
-        AutoSize = true;
-        AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        Padding = new Padding(0, 0, 12, 12);
 
-        _on.Font = new Font(Font, FontStyle.Bold);
-        var close = new Button { Text = "Fechar", DialogResult = DialogResult.Cancel, Width = 90, Anchor = AnchorStyles.Right };
+        // Topo: o liga/desliga geral, o estado como etiqueta e o ⓘ com a regra das compras.
+        Put(this, _on, Pad, Pad + 4);
+        Put(this, _state, _on.Right + 12, Pad + 5);
+        var about = new UiInfo();
+        Put(this, about, W - Pad - about.Width, Pad + 8);
+        _tips.SetToolTip(about, "Compra no Market do NPC, até 9.999 por vez, uma compra a cada 4 s, com a conta ligada no deck. Se o " +
+                                "ouro não der para tudo: poções, depois revives, depois a pokebola. A Golden Potion fica de fora. " +
+                                "Vale na hora, sem botão de salvar.");
+
+        // Pokébola e Revives lado a lado.
+        int y = Pad + 42;
+        var balls = Card(Pad, y, Half, 158);
+        CardHead(balls, _ballsOn, _ballInfo);
+        Put(balls, _ball, 12, 46, Half - 24);
+        StockRows(balls, Half, "Manter", _ballKeep, "Recomprar abaixo de", _ballBelow);
+        var revives = Card(Pad + Half + Gap, y, Half, 158);
+        CardHead(revives, _revivesOn, _reviveInfo);
+        _reviveBuy.AutoSize = false;
+        _reviveBuy.TextAlign = ContentAlignment.MiddleLeft;
+        _reviveBuy.AutoEllipsis = true;
+        Put(revives, _reviveBuy, 12, 46, Half - 24);
+        _reviveBuy.Height = 28;
+        StockRows(revives, Half, "Manter", _reviveKeep, "Recomprar abaixo de", _reviveBelow);
+        _tips.SetToolTip(_reviveKeep, "Conta todos os revives juntos.");
+
+        // Poções na largura toda.
+        y += 158 + Gap;
+        var potions = Card(Pad, y, Full, 192);
+        CardHead(potions, _potionsOn, _potionHave);
+        Put(potions, _potion, 12, 46, 420);
+        var keep = Ui.Label("Manter", muted: true);
+        Put(potions, keep, 12, 88);
+        Put(potions, _potionKeep, 70, 82, 150);
+        var below = Ui.Label("Recomprar abaixo de", muted: true);
+        Put(potions, below, 240, 88);
+        Put(potions, _potionBelow, 370, 82, 150);
+        _tips.SetToolTip(_potionKeep, "Conta todas as poções juntas.");
+        Put(potions, _potionFirst, 12, 120);
+        Put(potions, _potionInfo, 12, 150, Full - 24);
+        _potionInfo.Height = 32;
+
+        // Ouro mínimo e o registro (recolhido).
+        y += 192 + Gap;
+        var floor = Ui.Label("Nunca deixar o ouro abaixo de");
+        Put(this, floor, Pad, y + 6);
+        Put(this, _goldFloor, floor.Right + 10, y);
+        Put(this, _gold, _goldFloor.Right + 12, y + 6);
+        y += 28 + 14;
+        _logToggle.Cursor = Cursors.Hand;
+        Put(this, _logToggle, Pad, y + 2);
+        Put(this, _logCount, _logToggle.Right + 6, y);
+        _log.Box.ReadOnly = true;
+        _log.Box.Font = new Font("Consolas", 8.5f);
+        _log.Box.BackColor = Ui.Field;
+        Put(this, _log, Pad, y + 28, Full);
+        _log.Height = LogHeight;
+        _logToggle.Click += (_, _) => ToggleLog();
+        _logCount.Click += (_, _) => ToggleLog();
+
+        var close = new UiButton("Fechar", UiLook.Outline) { DialogResult = DialogResult.Cancel };
         close.Click += (_, _) => Close();
         CancelButton = close;
-
-        var stack = new FlowLayoutPanel
-        {
-            FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink, Location = new Point(12, 12),
-        };
-        stack.Controls.Add(_on);
-        stack.Controls.Add(_state);
-        stack.Controls.Add(Group("Pokébola",
-            Row(_ballsOn, Caption("Qual:"), _ball),
-            Row(Caption("Manter"), _ballKeep, Caption("Recomprar abaixo de"), _ballBelow),
-            _ballInfo));
-        stack.Controls.Add(Group("Revives",
-            Row(_revivesOn),
-            Row(Caption("Manter (todos os revives)"), _reviveKeep, Caption("Recomprar abaixo de"), _reviveBelow),
-            _reviveInfo));
-        stack.Controls.Add(Group("Poções",
-            Row(_potionsOn, Caption("Qual comprar:"), _potion),
-            Row(Caption("Manter (todas as poções)"), _potionKeep, Caption("Recomprar abaixo de"), _potionBelow),
-            _potionFirst,
-            _potionInfo));
-        stack.Controls.Add(Row(Caption("Nunca deixar o ouro abaixo de"), _goldFloor, _gold));
-        stack.Controls.Add(Group("Registro", _log));
-        var note = Info();
-        note.Text = "Compra no Market do NPC, até 9.999 por vez, uma compra a cada 4 s, com a conta ligada no deck. " +
-                    "Se o ouro não der para tudo: poções, depois revives, depois a pokebola. A Golden Potion fica de fora.";
-        stack.Controls.Add(note);
-        stack.Controls.Add(close);
-        Controls.Add(stack);
+        var footer = new UiFooter("Vale na hora, sem salvar.", close);
+        Controls.Add(footer);
+        _collapsedHeight = y + 20 + Pad + footer.Height;
+        ClientSize = new Size(W, _collapsedHeight);
 
         _loading = true;
         _on.Checked = config.On;
@@ -115,15 +145,19 @@ internal sealed class RestockWindow : Form
             number.ValueChanged += (_, _) => Apply();
         _ball.SelectedIndexChanged += (_, _) => Apply();
         _potion.SelectedIndexChanged += (_, _) => Apply();
+        ActiveControl = close;
     }
 
+    // Aberta pelo deck sem ele estar em primeiro plano (o autoteste): não pega o foco de quem está jogando.
+    protected override bool ShowWithoutActivation => ActiveForm is null;
+
     /// <summary>O texto do estado (no alto da janela), para o autoteste.</summary>
-    public string StateText => _state.Text;
+    public string StateText => _stateText;
 
     /// <summary>A poção escolhida na lista, para o autoteste.</summary>
     public string PotionText => _potion.Text;
 
-    /// <summary>O mesmo que clicar em "Recompra ligada nesta conta".</summary>
+    /// <summary>O mesmo que clicar em "Recompra ligada".</summary>
     public void SetOn(bool on) => _on.Checked = on;
 
     /// <summary>Como digitar no "Manter" da pokebola: o valor lido e o texto que fica no campo (para o autoteste).</summary>
@@ -134,23 +168,20 @@ internal sealed class RestockWindow : Form
         return (value, _ballKeep.Text);
     }
 
-    protected override void OnLoad(EventArgs e)
-    {
-        base.OnLoad(e);
-        // Mostrada sem ser modal, a janela não centraliza sozinha no deck.
-        var area = Owner?.Bounds ?? Screen.PrimaryScreen!.WorkingArea;
-        Location = new Point(area.Left + Math.Max(0, (area.Width - Width) / 2), area.Top + Math.Max(0, (area.Height - Height) / 2));
-    }
-
     /// <summary>O estoque, as listas (com os nomes e preços do jogo) e o registro que a página contou.</summary>
     public void ShowStatus(RestockStatus? status)
     {
         bool connected = status is { Connected: true };
-        _state.ForeColor = !_config.On ? SystemColors.GrayText : connected && !status!.Paused ? Color.SeaGreen : Color.DarkGoldenrod;
-        _state.Text = !_config.On ? "Desligada. Ligada, ela confere o estoque a cada segundo e compra o que faltar."
+        _stateText = !_config.On ? "Desligada. Ligada, ela confere o estoque a cada segundo e compra o que faltar."
             : !connected ? "Ligada, esperando o jogo conectar (a conta precisa estar no jogo, não na tela de login)."
             : status!.Paused ? "Ligada, em pausa: 3 compras seguidas não deram certo (volta sozinha em 2 min; veja o registro)."
             : $"Ligada{(status.Nick is null ? "" : $" na conta {status.Nick}")}.";
+        _state.Text = !_config.On ? "desligada"
+            : !connected ? "esperando o jogo conectar"
+            : status!.Paused ? "em pausa: 3 compras falharam"
+            : status.Nick is null ? "ligada" : $"ligada na conta {status.Nick}";
+        _state.Tone = !_config.On ? UiTone.Neutral : !connected ? UiTone.Warn : status!.Paused ? UiTone.Bad : UiTone.Ok;
+        _tips.SetToolTip(_state, _stateText);
 
         var balls = status?.Balls is { Count: > 0 } live ? live : Restock.KnownBalls.ToList();
         Fill(_ball, balls.Select(b => new Choice(b.Id, b.Price > 0 ? $"{b.Name} · {Restock.N(b.Price)} ouro" : b.Name ?? $"bola {b.Id}")),
@@ -161,41 +192,49 @@ internal sealed class RestockWindow : Form
 
         if (!connected)
         {
-            _ballInfo.Text = _reviveInfo.Text = "Na mochila: —";
-            _potionInfo.Text = "Na mochila: —";
+            _ballInfo.Text = _reviveInfo.Text = _potionHave.Text = "na mochila: —";
+            _ballInfo.ForeColor = Ui.Muted;
+            _reviveBuy.Text = "sempre o mais barato";
+            _potionInfo.Text = "Custo-benefício: esperando o jogo conectar.";
             _gold.Text = "";
+            _tips.SetToolTip(_reviveInfo, null);
         }
         else
         {
             var ball = status!.Balls?.FirstOrDefault(b => b.Id == _config.Balls.Id);
-            _ballInfo.Text = ball is null ? "Essa pokebola não está à venda no NPC." : $"Na mochila: {Restock.N(ball.Have)}";
+            _ballInfo.Text = ball is null ? "não está à venda no NPC" : $"na mochila: {Restock.N(ball.Have)}";
+            _ballInfo.ForeColor = ball is null ? Color.FromArgb(243, 214, 107) : Ui.Muted;
             var revives = status.Revives ?? new();
-            _reviveInfo.Text = $"Na mochila: {Restock.N(status.ReviveHave)}" +
-                               (revives.Count > 0 ? $" ({string.Join(" · ", revives.Select(r => $"{r.Name} {Restock.N(r.Have)}"))})" : "") +
-                               (revives.Count > 0 ? $"\nCompra: {revives[0].Name}, {Restock.N(revives[0].Price)} ouro" : "");
+            _reviveInfo.Text = $"na mochila: {Restock.N(status.ReviveHave)}";
+            _tips.SetToolTip(_reviveInfo, revives.Count > 0 ? string.Join("\n", revives.Select(r => $"{r.Name}: {Restock.N(r.Have)}")) : null);
+            _reviveBuy.Text = revives.Count > 0
+                ? $"sempre o mais barato · agora: {revives[0].Name}, {Restock.N(revives[0].Price)} ouro"
+                : "sempre o mais barato";
+            _potionHave.Text = $"na mochila (todas): {Restock.N(status.PotionHave)}";
             _potionInfo.Text = PotionInfo(status);
             _gold.Text = $"ouro agora: {Restock.N(status.Gold)}";
         }
 
-        var log = string.Join(Environment.NewLine, status?.Log ?? new());
+        var lines = status?.Log ?? new();
+        var log = string.Join(Environment.NewLine, lines);
+        _logCount.Text = lines.Count.ToString();
         if (_log.Text != log)
         {
             _log.Text = log;
-            _log.SelectionStart = _log.TextLength;
-            _log.ScrollToCaret();
+            _log.Box.SelectionStart = _log.Box.TextLength;
+            _log.Box.ScrollToCaret();
         }
     }
 
-    private string PotionInfo(RestockStatus status)
+    private static string PotionInfo(RestockStatus status)
     {
         var potions = status.Potions ?? new();
-        var lines = new List<string> { $"Na mochila (todas): {Restock.N(status.PotionHave)}" };
+        var lines = new List<string>();
         if (status.MaxHp is double hp && status.Threshold is double threshold)
         {
             var costs = potions.Where(p => p.Cost is not null).OrderBy(p => p.Cost)
                 .Select(p => $"{p.Name} {Restock.Cost(p.Cost!.Value)}");
-            lines.Add($"Ouro por HP útil no pokémon ativo ({Restock.N(hp)} HP, poção abaixo de {threshold * 100:0}%): " +
-                      string.Join(" · ", costs));
+            lines.Add($"Ouro por HP útil no ativo ({Restock.N(hp)} HP, poção abaixo de {threshold * 100:0}%): " + string.Join(" · ", costs));
         }
         else
         {
@@ -205,6 +244,14 @@ internal sealed class RestockWindow : Form
         if (chosen is not null)
             lines.Add($"Compra: {chosen.Name}" + (status.QueueFirst == chosen.Id ? " (1ª na fila do \"Usar Poções\")" : ""));
         return string.Join("\n", lines);
+    }
+
+    private void ToggleLog()
+    {
+        bool open = !_log.Visible;
+        _log.Visible = open;
+        _logToggle.Text = open ? "▾ Registro" : "▸ Registro";
+        ClientSize = new Size(W, _collapsedHeight + (open ? LogHeight + 8 : 0));
     }
 
     private void Apply()
@@ -243,66 +290,54 @@ internal sealed class RestockWindow : Form
         _loading = false;
     }
 
-    private static Control Group(string title, params Control[] rows)
+    protected override void Dispose(bool disposing)
     {
-        var inner = new FlowLayoutPanel
-        {
-            FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink, Location = new Point(8, 20),
-        };
-        inner.Controls.AddRange(rows);
-        // Todos com a mesma largura, a do texto mais comprido (as linhas das poções).
-        var group = new GroupBox
-        {
-            Text = title, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(8, 4, 8, 6),
-            MinimumSize = new Size(InfoWidth + 30, 0),
-        };
-        group.Controls.Add(inner);
-        return group;
+        if (disposing)
+            _tips.Dispose();
+        base.Dispose(disposing);
     }
 
-    private static Control Row(params Control[] controls)
+    private UiCard Card(int x, int y, int width, int height)
     {
-        var row = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = new Padding(0, 2, 0, 2) };
-        row.Controls.AddRange(controls);
-        return row;
+        var card = new UiCard { Bounds = new Rectangle(x, y, width, height) };
+        Controls.Add(card);
+        return card;
     }
 
-    private static Label Caption(string text) => new() { Text = text, AutoSize = true, Margin = new Padding(3, 6, 3, 0) };
-
-    private static Label Info() => new() { AutoSize = true, MaximumSize = new Size(InfoWidth, 0), ForeColor = SystemColors.GrayText, Margin = new Padding(3, 2, 3, 4) };
-
-    private static CheckBox Check(string text) => new() { Text = text, AutoSize = true, Margin = new Padding(3, 4, 3, 0) };
-
-    private static ComboBox Combo(int width) => new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = width };
-
-    private static NumericUpDown Number(decimal max) => new Count { Maximum = max, Width = 110, TextAlign = HorizontalAlignment.Right };
-
-    /// <summary>
-    /// Quantidade inteira escrita como no resto da janela e no registro (30.000), seja qual for o formato de
-    /// números do Windows. Aceita digitar com ponto, vírgula ou sem nada.
-    /// </summary>
-    private sealed class Count : NumericUpDown
+    /// <summary>O título do cartão: o liga/desliga com o nome à esquerda e a mochila à direita.</summary>
+    private static void CardHead(Control card, UiSwitch toggle, Label corner)
     {
-        // Como na classe base: com texto digitado (UserEdit), ler o Value valida o texto, então a marca sai antes;
-        // e o texto escrito aqui (ChangingText) não conta como digitado.
-        protected override void UpdateEditText()
-        {
-            if (UserEdit)
-            {
-                ValidateEditText();
-                return;
-            }
-            ChangingText = true;
-            Text = Restock.N((double)Value);
-        }
-
-        protected override void ValidateEditText()
-        {
-            UserEdit = false;
-            if (decimal.TryParse(new string(Text.Where(char.IsDigit).ToArray()), out var value))
-                Value = Math.Clamp(value, Minimum, Maximum);
-            UpdateEditText();
-        }
+        Put(card, toggle, 12, 13);
+        Put(card, corner, toggle.Right + 8, 12, card.Width - toggle.Right - 20);
+        corner.Height = 24;
     }
+
+    private static void StockRows(Control card, int width, string keepText, UiStepper keep, string belowText, UiStepper below)
+    {
+        Put(card, Ui.Label(keepText, muted: true), 12, 88);
+        Put(card, keep, width - 12 - 150, 82, 150);
+        Put(card, Ui.Label(belowText, muted: true), 12, 124);
+        Put(card, below, width - 12 - 150, 118, 150);
+    }
+
+    private static void Put(Control parent, Control control, int x, int y, int width = 0)
+    {
+        control.Location = new Point(x, y);
+        // O tamanho automático só se aplica no layout: já mede aqui, para posicionar o que vem ao lado.
+        if (control.AutoSize)
+            control.Size = control.GetPreferredSize(Size.Empty);
+        if (width > 0)
+            control.Width = width;
+        parent.Controls.Add(control);
+    }
+
+    private static UiSwitch CardSwitch(string text) => new(text) { Font = Ui.Bold };
+
+    private static Label Corner() => new()
+    {
+        AutoSize = false, TextAlign = ContentAlignment.MiddleRight, ForeColor = Ui.Muted, Font = Ui.Small, UseMnemonic = false,
+        AutoEllipsis = true,
+    };
+
+    private static UiStepper Stock() => new() { Maximum = Restock.MaxStock, Thousands = true, Increment = 100 };
 }

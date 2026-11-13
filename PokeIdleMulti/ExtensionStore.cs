@@ -309,6 +309,37 @@ internal sealed class ExtensionStore
         File.WriteAllText(_registryPath, JsonSerializer.Serialize(_known.Values.ToList(), new JsonSerializerOptions { WriteIndented = true }));
     }
 
+    /// <summary>O ícone da extensão (o do botão, ou o da loja) em <paramref name="size"/> px; null em SVG ou faltando.</summary>
+    public static Image? IconOf(ExtensionInfo extension, int size)
+    {
+        if (extension.Icon is null)
+            return null;
+        try
+        {
+            using var stream = File.OpenRead(Path.Combine(extension.Folder, extension.Icon));
+            using var image = Image.FromStream(stream);
+            return new Bitmap(image, new Size(size, size));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>A versão do manifest.json da pasta da extensão (null sem ele).</summary>
+    public static string? VersionOf(string folder)
+    {
+        try
+        {
+            var manifest = JsonNode.Parse(File.ReadAllText(Path.Combine(folder, "manifest.json")), documentOptions: Lenient);
+            return Text(manifest?["version"]);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private static string? Text(JsonNode? node) =>
         node is JsonValue value && value.TryGetValue<string>(out var text) ? text : null;
 

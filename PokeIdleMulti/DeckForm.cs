@@ -306,8 +306,7 @@ internal sealed class DeckForm : Form
                 Close();
                 return;
             }
-            MessageBox.Show(this, "Não consegui abrir o navegador embutido:\n\n" + ex.Message, Text,
-                MessageBoxButtons.OK, MessageBoxIcon.Error);
+            DeckBox.Show(this, "Não consegui abrir o navegador embutido.\n\n" + ex.Message, Text, DeckBoxIcon.Error);
         }
     }
 
@@ -342,8 +341,7 @@ internal sealed class DeckForm : Form
         {
             var lines = imported.Select(r =>
                 $"{_panes.FirstOrDefault(p => p.ProfileName == r.Profile)?.AccountName ?? r.Profile}: {r.Result}");
-            MessageBox.Show(this, "Configurações de extensão trazidas:\n\n" + string.Join("\n", lines), Text,
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            DeckBox.Show(this, "Configurações de extensão trazidas.\n\n" + string.Join("\n", lines), Text);
         }
     }
 
@@ -936,12 +934,47 @@ internal sealed class DeckForm : Form
     /// <summary>"Twitch no ar: cogu ▶, Kick no ar: biscoitao ▶" ou "Twitch: entre na Twitch…".</summary>
     private string LivesSummary(int index) => string.Join(", ", LivesParts(index));
 
-    /// <summary>Lives → Detalhes…: o resumo completo de cada conta, uma informação por linha.</summary>
+    /// <summary>
+    /// Lives → Detalhes…: uma linha por live aberta (conta, site, canal, se está tocando, a leve e o saldo dos pontos) e,
+    /// embaixo, os avisos de cada conta (o resto do <see cref="LivesParts"/>: entrar na Twitch, resgate parado…).
+    /// </summary>
     private void ShowLivesDetails()
     {
-        var text = string.Join("\n\n", Enumerable.Range(0, Accounts).Where(i => _lives[i] is not null)
-            .Select(i => _config.AccountNames[i] + "\n" + string.Join("\n", LivesParts(i).Select(p => "• " + p))));
-        MessageBox.Show(this, text.Length == 0 ? "Nenhuma conta com lives." : text, "Detalhes das lives");
+        var (rows, notes) = LivesDetails();
+        DeckBox.ShowTable(this, "Detalhes das lives",
+            new[] { ("Conta", 104), ("Site", 74), ("Canal", 136), ("Tocando", 104), ("Leve", 150), ("Pontos", 0) },
+            rows, notes, "Nenhuma conta com lives.");
+    }
+
+    private (List<ListViewItem> Rows, List<string> Notes) LivesDetails()
+    {
+        var rows = new List<ListViewItem>();
+        var notes = new List<string>();
+        for (int i = 0; i < Accounts; i++)
+        {
+            if (_lives[i] is not LivesWindow window)
+                continue;
+            string name = _config.AccountNames[i];
+            var kickRedeem = _config.RedeemKick[i] is not null ? _redeemKick[i] : null;
+            var twitchRedeem = _config.RedeemTwitch[i] is not null || _config.ClaimTwitchBonus ? _redeemTwitch[i] : null;
+            foreach (var site in new[] { LiveSite.Twitch, LiveSite.Kick })
+                foreach (var (channel, playing, reloads) in window.Playback(site))
+                {
+                    var item = new ListViewItem(name) { UseItemStyleForSubItems = false };
+                    item.SubItems.Add(site.ToString()).Tag = site == LiveSite.Kick ? UiTone.Kick : UiTone.Twitch;
+                    item.SubItems.Add(channel);
+                    string state = (playing == true ? "▶ tocando" : playing == false ? "‖ parada" : "—") + (reloads > 0 ? $"  ⟳{reloads}" : "");
+                    var color = playing == true ? Color.FromArgb(126, 226, 168) : playing == false ? Color.FromArgb(243, 214, 107) : Theme.Muted;
+                    item.SubItems.Add(state, color, Color.Empty, Ui.Font);
+                    string light = (site == LiveSite.Twitch ? _watchers[i]?.Status(channel) : _kickWatchers[i]?.Status(channel)) ?? "";
+                    item.SubItems.Add(light, Theme.Muted, Color.Empty, Ui.Font);
+                    item.SubItems.Add((site == LiveSite.Kick ? kickRedeem : twitchRedeem)?.Text(channel) ?? "");
+                    rows.Add(item);
+                }
+            foreach (var part in LivesParts(i).Where(p => !p.StartsWith("Twitch no ar:") && !p.StartsWith("Kick no ar:")))
+                notes.Add($"{name}: {part}");
+        }
+        return (rows, notes);
     }
 
     private List<string> LivesParts(int index)
@@ -1392,11 +1425,11 @@ internal sealed class DeckForm : Form
                 failed.Add(pane.AccountName);
         }
         if (failed.Count > 0)
-            MessageBox.Show(this,
+            DeckBox.Show(this,
                 $"Não consegui {(on ? "ligar" : "desligar")} o ULTRA em: {string.Join(", ", failed)}.\n\n" +
                 "O deck usa o interruptor do próprio jogo (Configurações → Desempenho → Modo ULTRA Economia): " +
                 "recarregue a conta (⟳ no cabeçalho) e tente de novo, ou ligue por lá.",
-                Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                Text, DeckBoxIcon.Warn);
     }
 
     // ---------- Ações das contas ----------
@@ -1511,7 +1544,7 @@ internal sealed class DeckForm : Form
 
     private void RenameAccount(int index)
     {
-        var name = Prompt.Ask(this, "Renomear conta", "Nome que aparece no deck (por exemplo, o nick do jogo):", _config.AccountNames[index]);
+        var name = Prompt.Ask(this, "Renomear conta", "Nome que aparece no deck (por exemplo, o nick do jogo):", _config.AccountNames[index], "Salvar");
         if (string.IsNullOrWhiteSpace(name))
             return;
         _config.AccountNames[index] = name;
@@ -1717,10 +1750,10 @@ internal sealed class DeckForm : Form
         }
         // Onde deu certo, o próprio Rotom avisa na página do jogo ("AUTO-SNIPE ATIVADO/PAUSADO").
         if (failed.Count > 0)
-            MessageBox.Show(this,
+            DeckBox.Show(this,
                 $"Não consegui {(enabled ? "ligar" : "desligar")} o sniper em: {string.Join(", ", failed)}.\n\n" +
                 "O deck mexe no Rotom pela página do jogo: recarregue a conta (⟳ no cabeçalho) e tente de novo.",
-                Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                Text, DeckBoxIcon.Warn);
     }
 
     // ---------- Voto no TopIdle ----------
@@ -1873,8 +1906,8 @@ internal sealed class DeckForm : Form
 
         if ((_topIdleGameId ?? await FindTopIdleGameAsync()) is not string gameId)
         {
-            MessageBox.Show(this, "Não consegui falar com o TopIdle agora. Confira a internet e tente de novo; as contas seguem rodando.",
-                Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            DeckBox.Show(this, "Não consegui falar com o TopIdle agora.\n\nConfira a internet e tente de novo; as contas seguem rodando.",
+                Text, DeckBoxIcon.Warn);
             return;
         }
         url ??= TopIdle.VoteUrl(gameId, await pane.ReadNickAsync());

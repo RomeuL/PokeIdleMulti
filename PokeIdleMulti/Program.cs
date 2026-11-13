@@ -16,10 +16,10 @@ internal static class Program
         }
         catch (WebView2RuntimeNotFoundException)
         {
-            MessageBox.Show(
+            DeckBox.Show(null,
                 "Falta o WebView2 Runtime da Microsoft (o motor de navegador que o deck usa).\n\n" +
                 "Baixe em https://go.microsoft.com/fwlink/p/?LinkId=2124703 e abra o deck de novo.",
-                "PokeIdle Deck", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                "PokeIdle Deck", DeckBoxIcon.Error);
             return;
         }
 
@@ -37,8 +37,7 @@ internal static class Program
         using var single = new Mutex(true, selfTest ? "PokeIdleDeck-selftest" : "PokeIdleDeck", out bool first);
         if (!first)
         {
-            MessageBox.Show("O PokeIdle Deck já está aberto.", "PokeIdle Deck",
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            DeckBox.Show(null, "O PokeIdle Deck já está aberto.", "PokeIdle Deck");
             return;
         }
 

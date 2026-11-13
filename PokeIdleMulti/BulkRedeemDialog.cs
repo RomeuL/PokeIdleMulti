@@ -100,17 +100,18 @@ internal sealed class BulkRedeemDialog : Form
     private readonly Action<CoreWebView2>? _setup;
     private readonly Action<int, LiveSite, string> _log;
 
-    private readonly ComboBox _account = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 300 };
-    private readonly ComboBox _site = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 170 };
-    private readonly TextBox _channel = new() { Width = 170, Margin = new Padding(3, 5, 3, 3) };
-    private readonly Button _check = new() { Text = "Conferir saldo", AutoSize = true };
-    private readonly NumericUpDown[] _counts = Kinds.Select(_ => new NumericUpDown { Minimum = 0, Maximum = 999, Width = 70, Margin = new Padding(3, 5, 3, 3) }).ToArray();
-    private readonly Label[] _costs = Kinds.Select(_ => new Label { AutoSize = true, Margin = new Padding(3, 8, 3, 0) }).ToArray();
-    private readonly Label _balance = new() { Dock = DockStyle.Top, Height = 26, TextAlign = ContentAlignment.MiddleLeft };
-    private readonly Label _total = new() { Dock = DockStyle.Top, Height = 42 };
-    private readonly ListBox _progress = new() { Dock = DockStyle.Fill, IntegralHeight = false };
-    private readonly Button _redeem = new() { Text = "Resgatar", Width = 100 };
-    private readonly Button _cancel = new() { Text = "Cancelar", Width = 100 };
+    private readonly UiSelect _account = new() { Width = 300 };
+    private readonly UiSegment _site = new("Twitch", "Kick");
+    private readonly UiField _channel = new() { Width = 200 };
+    private readonly UiButton _check = new("Conferir saldo", UiLook.Outline, compact: true);
+    private readonly UiStepper[] _counts = Kinds.Select(_ => new UiStepper { Minimum = 0, Maximum = 999, Width = 104 }).ToArray();
+    private readonly Label[] _costs = Kinds.Select(_ => new Label { AutoSize = true, ForeColor = Theme.Muted, UseMnemonic = false }).ToArray();
+    private readonly Label _balance = new() { AutoSize = false, Height = 22, UseMnemonic = false, ForeColor = Theme.Muted, TextAlign = ContentAlignment.MiddleLeft };
+    private readonly Label _total = new() { AutoSize = false, Height = 38, UseMnemonic = false, Font = Ui.Bold };
+    private readonly UiList _progress = new(rowHeight: 22) { MultiSelect = false, FillLast = true, HeaderStyle = ColumnHeaderStyle.None };
+    private readonly UiButton _redeem = new("Resgatar", UiLook.DangerFill);
+    private readonly UiButton _cancel = new("Cancelar", UiLook.Outline);
+    private readonly ToolTip _tips = Ui.Tips(30000);
 
     private sealed record Reward(string Id, string Title, string? Prompt, int Cost, string? Blocked);
 
@@ -150,59 +151,77 @@ internal sealed class BulkRedeemDialog : Form
         _log = log;
 
         Text = "Resgate em lote (pontos da Twitch e da Kick)";
-        Icon = Theme.AppIcon;
+        Ui.Window(this);
         FormBorderStyle = FormBorderStyle.Sizable;
         MaximizeBox = MinimizeBox = false;
-        StartPosition = FormStartPosition.CenterScreen;
+        StartPosition = FormStartPosition.CenterParent;
         AutoScaleDimensions = new SizeF(96F, 96F);
         AutoScaleMode = AutoScaleMode.Dpi;
-        ClientSize = new Size(560, 590);
-        MinimumSize = new Size(480, 450);
-        Padding = new Padding(12);
+        ClientSize = new Size(576, 620);
+        MinimumSize = new Size(520, 560);
 
-        var hint = new Label
+        // O aviso no topo: gasta na hora.
+        var warn = new Label
         {
-            Dock = DockStyle.Top, Height = 56,
-            Text = "Resgata de uma vez quantos você quiser de cada bônus do PokeIdle no canal, com os pontos da conta escolhida " +
-                   "(o login do site nela). Um por vez, de 1 a 2 s entre eles; para no primeiro erro do site. O dono do canal " +
-                   "tem pontos infinitos e não precisa de saldo.",
+            Dock = DockStyle.Top, Height = 34, ForeColor = Color.FromArgb(243, 214, 107), UseMnemonic = false, TextAlign = ContentAlignment.MiddleLeft,
+            Text = "⚠  Gasta os pontos na hora: um por vez, de 1 a 2 s entre eles; para no primeiro erro do site.",
         };
+        _tips.SetToolTip(warn, "Resgata de uma vez quantos você quiser de cada bônus do PokeIdle no canal, com os pontos da conta escolhida " +
+                               "(o login do site nela). Um por vez, de 1 a 2 s entre eles; para no primeiro erro do site. O dono do canal " +
+                               "tem pontos infinitos e não precisa de saldo.");
 
         foreach (var (name, _) in accounts)
             _account.Items.Add(name);
         _account.SelectedIndex = Math.Clamp(account, 0, accounts.Count - 1);
-        foreach (var site in Sites)
-            _site.Items.Add(site.ToString());
-        _site.SelectedIndex = 0;
         _channel.Text = "biscoitao";
 
-        var form = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 3, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink };
-        form.Controls.Add(Caption("Conta do deck:"), 0, 0);
-        form.Controls.Add(_account, 1, 0);
-        form.SetColumnSpan(_account, 2);
-        form.Controls.Add(Caption("Site:"), 0, 1);
-        form.Controls.Add(_site, 1, 1);
-        form.Controls.Add(Caption("Canal:"), 0, 2);
-        form.Controls.Add(_channel, 1, 2);
-        form.Controls.Add(_check, 2, 2);
+        // De onde: a conta, o site e o canal (com o Conferir saldo grudado); o saldo embaixo.
+        var where = new UiCard { Dock = DockStyle.Top, Height = 158 };
+        Put(where, Caption("Conta"), 12, 18);
+        Put(where, _account, 84, 12);
+        Put(where, Caption("Site"), 12, 54);
+        Put(where, _site, 84, 48);
+        Put(where, Caption("Canal"), 12, 90);
+        Put(where, _channel, 84, 84);
+        Put(where, _check, _channel.Right + 8, 84);
+        Put(where, _balance, 12, 122);
+        _balance.Width = 520;
+
+        // Os bônus: quantos de cada, o custo e o total.
+        var rewards = new UiCard { Dock = DockStyle.Top, Height = 12 + 36 * Kinds.Length + 50 };
         for (int k = 0; k < Kinds.Length; k++)
         {
-            form.Controls.Add(Caption(Names[k] + ":"), 0, 3 + k);
-            form.Controls.Add(_counts[k], 1, 3 + k);
-            form.Controls.Add(_costs[k], 2, 3 + k);
+            Put(rewards, Caption(Names[k]), 12, 18 + 36 * k);
+            Put(rewards, _counts[k], 190, 12 + 36 * k);
+            Put(rewards, _costs[k], 306, 18 + 36 * k);
             _counts[k].ValueChanged += (_, _) => UpdateView();
         }
+        Put(rewards, _total, 12, 12 + 36 * Kinds.Length + 4);
+        _total.Width = 520;
 
-        var buttons = new FlowLayoutPanel { Dock = DockStyle.Bottom, FlowDirection = FlowDirection.RightToLeft, Height = 40 };
-        buttons.Controls.Add(_cancel);
-        buttons.Controls.Add(_redeem);
+        var progressTitle = Ui.Label("Andamento", muted: true, small: true);
+        progressTitle.AutoSize = false;
+        progressTitle.Dock = DockStyle.Top;
+        progressTitle.Height = 22;
+        _progress.Columns.Add("Andamento", 0);
+
+        var footer = new UiFooter(null, _cancel, _redeem);
+        var body = new Panel { Dock = DockStyle.Fill, Padding = new Padding(14, 8, 14, 10) };
+        body.Controls.Add(new UiFrame(_progress) { Dock = DockStyle.Fill });
+        body.Controls.Add(progressTitle);
+        body.Controls.Add(Ui.Gap(10, DockStyle.Top));
+        body.Controls.Add(rewards);
+        body.Controls.Add(Ui.Gap(10, DockStyle.Top));
+        body.Controls.Add(where);
+        body.Controls.Add(warn);
+
         // Enter confere o saldo; resgatar é sempre no clique (e pergunta antes).
         AcceptButton = _check;
 
         _check.Click += async (_, _) => await CheckAsync();
         _account.SelectedIndexChanged += async (_, _) => await CheckAsync();
         _site.SelectedIndexChanged += async (_, _) => await CheckAsync();
-        _channel.TextChanged += (_, _) =>
+        _channel.Box.TextChanged += (_, _) =>
         {
             _note = "Confira o saldo deste canal (Conferir saldo).";
             UpdateView();
@@ -218,14 +237,18 @@ internal sealed class BulkRedeemDialog : Form
         };
         Shown += async (_, _) => await CheckAsync();
 
-        // Os controles encaixam do último para o primeiro: texto no topo, botões embaixo, a lista do andamento no meio.
-        Controls.Add(_progress);
-        Controls.Add(buttons);
-        Controls.Add(_total);
-        Controls.Add(_balance);
-        Controls.Add(form);
-        Controls.Add(hint);
+        Controls.Add(body);
+        Controls.Add(footer);
         UpdateView();
+    }
+
+    // Aberta pelo deck sem ele estar em primeiro plano (o autoteste): não pega o foco de quem está jogando.
+    protected override bool ShowWithoutActivation => ActiveForm is null;
+
+    private static void Put(Control parent, Control control, int x, int y)
+    {
+        control.Location = new Point(x, y);
+        parent.Controls.Add(control);
     }
 
     /// <summary>A conta escolhida (índice nas contas do deck).</summary>
@@ -271,7 +294,7 @@ internal sealed class BulkRedeemDialog : Form
     public string StatusText => _balance.Text + Environment.NewLine + _total.Text;
 
     /// <summary>As linhas do andamento do último resgate.</summary>
-    public IReadOnlyList<string> ProgressLines => _progress.Items.Cast<string>().ToList();
+    public IReadOnlyList<string> ProgressLines => _progress.Items.Cast<ListViewItem>().Select(i => i.Text).ToList();
 
     /// <summary>Quantos o último resgate fez, e por que parou antes do fim (null: fez todos).</summary>
     public int Done { get; private set; }
@@ -291,7 +314,7 @@ internal sealed class BulkRedeemDialog : Form
 
     private static string N(int value) => value.ToString("N0", PtBr);
 
-    private static Label Caption(string text) => new() { Text = text, AutoSize = true, Margin = new Padding(0, 8, 6, 0) };
+    private static Label Caption(string text) => Ui.Label(text, muted: true);
 
     // "10 XP + 10 Captura + 10 Shiny"
     private static string Describe(int[] counts) =>
@@ -343,6 +366,14 @@ internal sealed class BulkRedeemDialog : Form
                           : c.Owner ? " (dono do canal: não precisa de saldo)"
                           : Total() <= (c.Points ?? 0) ? $" (sobram {N((c.Points ?? 0) - Total())})" : "")
                       + (refusal is not null ? Environment.NewLine + refusal : "");
+        _total.ForeColor = refusal is not null ? Color.FromArgb(255, 143, 130) : c is null ? Theme.Text : Color.FromArgb(126, 226, 168);
+        _balance.ForeColor = c is null ? Theme.Muted : Theme.Text;
+        string verb = Total() > 0 ? $"Resgatar {N(Total())} pontos" : "Resgatar";
+        if (_redeem.Text != verb)
+        {
+            _redeem.Text = verb;
+            _redeem.Width = Math.Max(84, TextRenderer.MeasureText(verb, Ui.Font, Size.Empty, Ui.Measure).Width + 28);
+        }
         _redeem.Enabled = !_busy && Refusal() is null;
         _check.Enabled = _account.Enabled = _site.Enabled = _channel.Enabled = !_busy;
         foreach (var count in _counts)
@@ -353,8 +384,11 @@ internal sealed class BulkRedeemDialog : Form
     {
         if (IsDisposed)
             return;
-        _progress.Items.Add(line);
-        _progress.TopIndex = _progress.Items.Count - 1;
+        var item = _progress.Items.Add(line);
+        if (line.Contains("erro", StringComparison.OrdinalIgnoreCase) || line.StartsWith("Parou"))
+            item.ForeColor = Color.FromArgb(243, 214, 107);
+        _progress.FitLastColumn();
+        item.EnsureVisible();
     }
 
     /// <summary>
@@ -394,13 +428,13 @@ internal sealed class BulkRedeemDialog : Form
     {
         if (_busy || Current is not Context c || Refusal() is not null)
             return;
-        var answer = MessageBox.Show(this,
+        bool answer = DeckBox.Confirm(this,
             $"Resgatar {Describe(Counts)} em {c.Channel} na {c.Site} com a conta {_accounts[Account].Name}" +
             (c.Login is null ? "" : $" ({c.Site}: {c.Login})") + "?\n\n" +
             (c.Owner ? $"É o dono do canal (pontos infinitos): {N(Total())} pontos em bônus."
                 : $"Gasta {N(Total())} dos {N(c.Points ?? 0)} pontos."),
-            Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
-        if (answer == DialogResult.Yes)
+            Text, "Resgatar", danger: true);
+        if (answer)
             await RunAsync();
     }
 
