@@ -23,7 +23,21 @@ internal static class DeckBox
     public static bool Confirm(IWin32Window? owner, string text, string title, string verb, bool danger = false) =>
         Run(owner, text, title, danger ? DeckBoxIcon.Danger : DeckBoxIcon.Question, verb, "Cancelar", danger) == DialogResult.OK;
 
-    private static DialogResult Run(IWin32Window? owner, string text, string title, DeckBoxIcon icon, string verb, string? cancel, bool danger)
+    /// <summary>
+    /// Pergunta com dois verbos e "Cancelar": 1 quando escolhe <paramref name="verb"/>, 2 quando escolhe <paramref name="alt"/>, 0
+    /// quando cancela. Com <paramref name="danger"/>, os dois ficam vermelhos (o <paramref name="verb"/> cheio, o outro só na
+    /// borda) e o foco começa no "Cancelar".
+    /// </summary>
+    public static int Choose(IWin32Window? owner, string text, string title, string verb, string alt, bool danger = false) =>
+        Run(owner, text, title, danger ? DeckBoxIcon.Danger : DeckBoxIcon.Question, verb, "Cancelar", danger, alt) switch
+        {
+            DialogResult.OK => 1,
+            DialogResult.Yes => 2,
+            _ => 0,
+        };
+
+    private static DialogResult Run(IWin32Window? owner, string text, string title, DeckBoxIcon icon, string verb, string? cancel, bool danger,
+        string? alt = null)
     {
         text = text.Replace("\r\n", "\n").Trim();
         int cut = text.IndexOf("\n\n", StringComparison.Ordinal);
@@ -69,6 +83,8 @@ internal static class DeckBox
             no = new UiButton(cancel, UiLook.Outline) { DialogResult = DialogResult.Cancel };
             buttons.Add(no);
         }
+        if (alt is not null)
+            buttons.Add(new UiButton(alt, danger ? UiLook.Danger : UiLook.Outline) { DialogResult = DialogResult.Yes });
         buttons.Add(main);
         var footer = new UiFooter(null, buttons.ToArray());
 

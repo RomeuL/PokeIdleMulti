@@ -7,7 +7,7 @@ internal sealed class ChannelsDialog : Form
     private readonly UiField _kick = new(multiline: true) { Dock = DockStyle.Fill };
     private readonly UiStepper _twitchLives = new() { Minimum = 0, Maximum = TwitchLive.MaxSlots };
     private readonly UiStepper _kickLives = new() { Minimum = 0, Maximum = KickLive.MaxSlots };
-    private readonly List<(UiSelect Kick, UiSelect Twitch, UiSwitch Light, UiSwitch KickLight)> _redeem = new();
+    private readonly List<(UiSelect Kick, UiSelect Twitch, UiSwitch Guard)> _redeem = new();
     private readonly UiSwitch _claim = new("Pegar o baú de bônus sozinho");
     private readonly ToolTip _tips = Ui.Tips(30000);
 
@@ -17,31 +17,28 @@ internal sealed class ChannelsDialog : Form
     private const string ListTip =
         "Um canal por linha, como aparece no endereço (twitch.tv/rodil → rodil). Use os streamers oficiais do painel de bônus " +
         "do jogo.\n\nO deck abre o player das primeiras da lista que estiverem no ar, até o número de \"Lives abertas por conta\" " +
-        "(a primeira tem prioridade), e não deixa live offline aberta. Os pontos só vêm com a live tocando. Ao salvar, as lives " +
-        "abertas reabrem com os canais novos.";
+        "(a primeira tem prioridade), e não deixa live offline aberta. Ao salvar, as lives abertas reabrem com os canais novos." +
+        "\n\nAs lives abrem leves: o player da Twitch fica parado e o da Kick em branco (só para o baú e os resgates), e quem " +
+        "assiste é o deck, sem navegador. Gasta quase nada e rende igual.";
 
     private const string RedeemTip =
         "Confere o saldo de cada live aberta na conta (Kick a cada 5 min, Twitch a cada 2) e resgata 1 bônus se der (as horas " +
         "acumulam).\n\nSem a {0} vinculada no jogo ({1}) os pontos voltam: o deck para de resgatar nesta conta e avisa no menu Lives.";
 
-    private const string LightTip =
-        "Twitch leve: o player da Twitch abre parado, sem vídeo (fica só para o baú e o resgate), e quem assiste é o deck, sem " +
-        "navegador, como os mineradores de pontos. Gasta quase nada. Os pontos que entram aparecem no menu Lives (+N/h); sem os " +
-        "de assistir em 20 min, o deck avisa.";
-
-    private const string KickLightTip =
-        "Kick leve: o player da Kick fica em branco (abre só para resgatar), e quem assiste é o deck, sem navegador, mandando à " +
-        "Kick o que o player manda. Rende igual e gasta quase nada. O saldo de cada live vai para o kick-leve.log, na pasta do deck.";
+    private const string GuardTip =
+        "Guarda do bônus: quando o bônus escolhido da conta num site vence em menos de 30 min (ou venceu), o deck procura nos " +
+        "canais da lista e nos oficiais do jogo, fora das lives abertas, offline primeiro, um com pontos e resgata 1 ali (as " +
+        "horas somam). Confere no jogo se o tempo subiu.";
 
     /// <summary>
     /// <paramref name="accounts"/>, <paramref name="redeemKick"/> e <paramref name="redeemTwitch"/>: o nome de cada conta e o
     /// bônus que ela resgata sozinha com os pontos da Kick e da Twitch (null: não resgata). <paramref name="claimTwitch"/>:
-    /// pegar o baú de bônus da Twitch. <paramref name="twitchLight"/> e <paramref name="kickLight"/>: a Twitch leve e a Kick
-    /// leve (sem vídeo) de cada conta.
+    /// pegar o baú de bônus da Twitch. <paramref name="bonusGuard"/>: a guarda do bônus de cada conta (null: ligada em
+    /// todas). A Twitch e a Kick leves não aparecem: desde 12/11 ficam sempre ligadas.
     /// </summary>
     public ChannelsDialog(IEnumerable<string> twitch, IEnumerable<string> kick, int twitchLives, int kickLives,
         IReadOnlyList<string> accounts, IReadOnlyList<KickReward?> redeemKick, IReadOnlyList<KickReward?> redeemTwitch, bool claimTwitch,
-        IReadOnlyList<bool>? twitchLight = null, IReadOnlyList<bool>? kickLight = null)
+        IReadOnlyList<bool>? bonusGuard = null)
     {
         Text = "Config das lives";
         Ui.Dialog(this);
@@ -77,19 +74,17 @@ internal sealed class ChannelsDialog : Form
         lists.Controls.Add(twitchCard, 0, 0);
         lists.Controls.Add(kickCard, 1, 0);
 
-        // Por conta: o bônus que ela resgata sozinha em cada site e as lives leves.
-        var table = new UiTable { Dock = DockStyle.Fill, ColumnCount = 5, RowCount = accounts.Count + 1 };
+        // Por conta: o bônus que ela resgata sozinha em cada site e a guarda.
+        var table = new UiTable { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = accounts.Count + 1 };
         table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 206));
-        table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 206));
-        table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 112));
+        table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 230));
+        table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 230));
         table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
         table.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
         table.Controls.Add(Header("Conta", null), 0, 0);
         table.Controls.Add(Header("Resgatar na Kick", string.Format(RedeemTip, "Kick", "Bônus na Kick")), 1, 0);
         table.Controls.Add(Header("Resgatar na Twitch", string.Format(RedeemTip, "Twitch", "Bônus Twitch")), 2, 0);
-        table.Controls.Add(Header("Twitch leve", LightTip), 3, 0);
-        table.Controls.Add(Header("Kick leve", KickLightTip), 4, 0);
+        table.Controls.Add(Header("Guarda", GuardTip), 3, 0);
         for (int i = 0; i < accounts.Count; i++)
         {
             table.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
@@ -101,14 +96,12 @@ internal sealed class ChannelsDialog : Form
             _tips.SetToolTip(name, accounts[i]);
             var kickCombo = NewReward(i < redeemKick.Count ? redeemKick[i] : null);
             var twitchCombo = NewReward(i < redeemTwitch.Count ? redeemTwitch[i] : null);
-            var light = Cell(new UiSwitch { Checked = twitchLight is not null && i < twitchLight.Count && twitchLight[i] }, LightTip);
-            var kickLightBox = Cell(new UiSwitch { Checked = kickLight is not null && i < kickLight.Count && kickLight[i] }, KickLightTip);
+            var guard = Cell(new UiSwitch { Checked = bonusGuard is null || (i < bonusGuard.Count && bonusGuard[i]) }, GuardTip);
             table.Controls.Add(name, 0, i + 1);
             table.Controls.Add(kickCombo, 1, i + 1);
             table.Controls.Add(twitchCombo, 2, i + 1);
-            table.Controls.Add(light, 3, i + 1);
-            table.Controls.Add(kickLightBox, 4, i + 1);
-            _redeem.Add((kickCombo, twitchCombo, light, kickLightBox));
+            table.Controls.Add(guard, 3, i + 1);
+            _redeem.Add((kickCombo, twitchCombo, guard));
         }
         int tableHeight = table.Padding.Vertical + 32 + 40 * accounts.Count;
 
@@ -234,12 +227,8 @@ internal sealed class ChannelsDialog : Form
 
     public bool ClaimTwitchBonus => _claim.Checked;
 
-    /// <summary>A Twitch leve (sem vídeo) de cada conta.</summary>
-    public bool[] TwitchLight => _redeem.Select(r => r.Light.Checked).ToArray();
-
-    /// <summary>A Kick leve (sem vídeo) de cada conta.</summary>
-    public bool[] KickLight => _redeem.Select(r => r.KickLight.Checked).ToArray();
-
+    /// <summary>A guarda do bônus de cada conta (resgata em canal fora das lives quando o bônus está para vencer).</summary>
+    public bool[] BonusGuard => _redeem.Select(r => r.Guard.Checked).ToArray();
 
     protected override void Dispose(bool disposing)
     {
@@ -250,7 +239,7 @@ internal sealed class ChannelsDialog : Form
 
     private UiSelect NewReward(KickReward? reward)
     {
-        var combo = new UiSelect { Width = 192, Anchor = AnchorStyles.Left, Margin = new Padding(8, 0, 0, 0) };
+        var combo = new UiSelect { Width = 210, Anchor = AnchorStyles.Left, Margin = new Padding(8, 0, 0, 0) };
         combo.Items.AddRange(Rewards);
         combo.SelectedIndex = reward is KickReward r && Enum.IsDefined(r) ? (int)r + 1 : 0;
         return combo;

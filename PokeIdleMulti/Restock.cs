@@ -17,8 +17,11 @@ internal sealed class RestockConfig
     /// <summary>Os revives, contados juntos; compra sempre o mais barato.</summary>
     public RestockRule Revives { get; set; } = new() { On = true, Keep = 500, Below = 100 };
 
-    /// <summary>As poções, contadas juntas; Id 0 é o melhor custo-benefício no pokemon ativo, 204 a Ultimate Potion.</summary>
-    public RestockRule Potions { get; set; } = new() { On = true, Id = Restock.UltimatePotion, Keep = 5000, Below = 2000 };
+    /// <summary>
+    /// As poções, contadas juntas; Id 0 (de fábrica desde 14/11) é o melhor custo-benefício no pokemon ativo, 204 a
+    /// Ultimate Potion.
+    /// </summary>
+    public RestockRule Potions { get; set; } = new() { On = true, Id = 0, Keep = 5000, Below = 2000 };
 
     /// <summary>Pôr a poção escolhida em 1º na fila da automação "Usar Poções" (a ordem dela é a ordem de gasto).</summary>
     public bool PotionFirst { get; set; } = true;
@@ -33,6 +36,9 @@ internal sealed class RestockConfig
         Balls ??= fresh.Balls;
         Revives ??= fresh.Revives;
         Potions ??= fresh.Potions;
+        // A recompra nunca configurada (desligada, com a poção de fábrica de antes, a Ultimate) passa para o custo-benefício.
+        if (!On && Potions is { On: true, Id: Restock.UltimatePotion, Keep: 5000, Below: 2000 })
+            Potions.Id = 0;
         foreach (var rule in new[] { Balls, Revives, Potions })
         {
             rule.Keep = Math.Clamp(rule.Keep, 0, Restock.MaxStock);

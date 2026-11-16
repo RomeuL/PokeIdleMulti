@@ -99,18 +99,25 @@ internal sealed class DeckConfig
     public bool ClaimTwitchBonus { get; set; } = true;
 
     /// <summary>
-    /// A Twitch leve em cada conta (Lives → Config…): o player das lives da Twitch abre parado, sem vídeo, e quem assiste
-    /// é o deck, sem navegador (<see cref="TwitchWatcher"/>). De fábrica ligada em todas as contas (também no deck.json
-    /// de antes, que não tinha o campo); desliga em Lives → Config….
+    /// A Twitch leve em cada conta: o player das lives da Twitch abre parado, sem vídeo, e quem assiste é o deck, sem
+    /// navegador (<see cref="TwitchWatcher"/>). Sempre ligada desde 12/11 (saiu de Lives → Config…, e o deck.json com
+    /// false volta ligado ao abrir). O player com vídeo segue no código (o autoteste ainda passa por ele) para o caso de
+    /// precisar de novo.
     /// </summary>
     public bool[] TwitchLight { get; set; } = Enumerable.Repeat(true, Accounts).ToArray();
 
     /// <summary>
-    /// A Kick leve em cada conta (Lives → Config…): o player das lives da Kick fica em branco (abre só para resgatar), e
-    /// quem assiste é o deck, sem navegador (<see cref="KickWatcher"/>). Rende igual ao player (conferido em 05/11). De
-    /// fábrica ligada em todas as contas (também no deck.json de antes, que não tinha o campo); desliga em Lives → Config….
+    /// A Kick leve em cada conta: o player das lives da Kick fica em branco (abre só para resgatar), e quem assiste é o
+    /// deck, sem navegador (<see cref="KickWatcher"/>). Rende igual ao player (conferido em 05/11). Sempre ligada desde
+    /// 12/11, como a <see cref="TwitchLight"/> (o player com vídeo segue no código).
     /// </summary>
     public bool[] KickLight { get; set; } = Enumerable.Repeat(true, Accounts).ToArray();
+
+    /// <summary>
+    /// A guarda do bônus em cada conta (Lives → Config…): com o bônus escolhido num site vencendo em menos de 30 min, o deck
+    /// resgata 1 num canal fora das lives abertas que tenha os pontos (offline primeiro). De fábrica ligada em todas.
+    /// </summary>
+    public bool[] BonusGuard { get; set; } = Enumerable.Repeat(true, Accounts).ToArray();
 
     /// <summary>
     /// Streamers oficiais na Kick, em ordem de prioridade. Abre a live inteira, que é o que rende pontos
@@ -155,6 +162,18 @@ internal sealed class DeckConfig
     /// <summary>A recompra de pokebolas, revives e poções de cada conta (o carrinho no cabeçalho dela).</summary>
     public RestockConfig[] Restock { get; set; } = Enumerable.Range(0, Accounts).Select(_ => new RestockConfig()).ToArray();
 
+    /// <summary>A fila de PvP de cada conta (⚔ no cabeçalho): ligada, a conta entra na fila do ranqueado e volta depois de cada partida.</summary>
+    public bool[] Pvp { get; set; } = new bool[Accounts];
+
+    /// <summary>
+    /// Como as partidas da fila de PvP aparecem em cada conta (botão direito no ⚔): "completa" (o replay do jogo na tela),
+    /// "mini" (a janelinha do canto) ou "off" (só o aviso do resultado). De fábrica, "off".
+    /// </summary>
+    public string[] PvpScreen { get; set; } = Enumerable.Range(0, Accounts).Select(_ => PvpScreens.Off).ToArray();
+
+    /// <summary>A velocidade das partidas mostradas (completa ou mini) em cada conta: 0 = a do jogo (acelera para caber até a próxima).</summary>
+    public double[] PvpSpeed { get; set; } = new double[Accounts];
+
     /// <summary>Da versão em que o kick só fechava a 2ª live: lido uma vez e convertido em <see cref="Kick"/>.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool[]? KickSingle { get; set; }
@@ -176,8 +195,10 @@ internal sealed class DeckConfig
         config.Zoom = Fill(config.Zoom, _ => 1.0);
         config.Muted = Fill(config.Muted, _ => false);
         config.Off = Fill(config.Off, _ => false);
-        config.TwitchLight = Fill(config.TwitchLight, _ => true);
-        config.KickLight = Fill(config.KickLight, _ => true);
+        // Twitch e Kick leves sempre ligadas (desde 12/11): o false de antes não vale mais.
+        config.TwitchLight = Enumerable.Repeat(true, Accounts).ToArray();
+        config.KickLight = Enumerable.Repeat(true, Accounts).ToArray();
+        config.BonusGuard = Fill(config.BonusGuard, _ => true);
         config.Kick = Fill(config.Kick, _ => new LiveLimit())
             .Select(k => k is { Closed: not null } ? k : new LiveLimit()).ToArray();
         config.KickLives = Math.Clamp(config.KickLives, 0, KickLive.MaxSlots);
@@ -193,6 +214,9 @@ internal sealed class DeckConfig
         foreach (var twitch in config.Twitch)
             twitch.Fit(config.TwitchLives);
         config.Restock = Fill(config.Restock, _ => new RestockConfig()).Select(r => (r ?? new RestockConfig()).Normalized()).ToArray();
+        config.Pvp = Fill(config.Pvp, _ => false);
+        config.PvpScreen = Fill(config.PvpScreen, _ => PvpScreens.Off).Select(PvpScreens.Normalized).ToArray();
+        config.PvpSpeed = Fill(config.PvpSpeed, _ => 0d).Select(PvpScreens.NormalizedSpeed).ToArray();
         config.Focused = Math.Clamp(config.Focused, 0, Accounts - 1);
         config.GameFps = Math.Clamp(config.GameFps, 5, 60);
         config.SpriteMs = Math.Clamp(config.SpriteMs, 220, 10000);

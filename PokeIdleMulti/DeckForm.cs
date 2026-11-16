@@ -87,6 +87,8 @@ internal sealed class DeckForm : Form
     private readonly PopupWindow?[] _voteWindows = new PopupWindow?[Accounts];
     private readonly RestockWindow?[] _restockWindows = new RestockWindow?[Accounts];
     private readonly bool[] _restockBusy = new bool[Accounts];
+    private readonly bool[] _pvpBusy = new bool[Accounts];
+    private readonly BonusGuard _guard = new();
     private string? _topIdleGameId;
     private DateTime _topIdleRetryAt;
     private bool _topIdleLookup;
@@ -123,6 +125,10 @@ internal sealed class DeckForm : Form
             foreach (var old in Directory.GetFiles(_root, "resgates*.log"))
                 File.Delete(old);
         _redeemLog = new RedeemLog(_root, _config.AccountNames);
+        // O diagnóstico da carga do jogo (o do autoteste também começa vazio).
+        Diag.Folder = Path.Combine(_root, "diagnostico");
+        if (selfTest && Directory.Exists(Diag.Folder))
+            Directory.Delete(Diag.Folder, true);
         for (int i = 0; i < Accounts; i++)
         {
             int index = i;
@@ -150,12 +156,19 @@ internal sealed class DeckForm : Form
             var pane = new AccountPane(i)
             {
                 AccountName = _config.AccountNames[i], ReduceMotion = _config.ReduceMotion, Ultra = _config.Ultra, GameFps = _config.GameFps, SpriteMs = _config.SpriteMs,
-                RestockConfig = _config.Restock[i],
+                RestockConfig = _config.Restock[i], PvpOn = _config.Pvp[i],
+                PvpScreen = _config.PvpScreen[i], PvpSpeed = _config.PvpSpeed[i],
+                // O jogo-teste não conecta: o autoteste liga o vigia só no teste dele.
+                LoadTimeout = selfTest ? null : TimeSpan.FromSeconds(60),
             };
+            pane.Diag = new PaneDiag(Diag.Folder, pane.ProfileName, () => pane.AccountName);
+            pane.GameStuck += (p, text) => LogOpening(p, text);
             pane.ShowRestock(null);
             pane.RestockRequested += p => ShowRestockWindow(p.Index);
+            pane.PvpRequested += p => _ = SetPvpAsync(p.Index, !_config.Pvp[p.Index]);
+            pane.PvpMenuRequested += p => ShowPvpMenu(p.Index);
             pane.FocusRequested += p => ToggleFocus(p.Index);
-            pane.ReloadRequested += p => p.Reload();
+            pane.ReloadRequested += p => _ = p.ReloadCleanAsync();
             pane.FullscreenRequested += _ => ToggleFullscreen();
             pane.SettingsChanged += OnPaneSettingsChanged;
             pane.Clicked += (p, click) => _ = EchoAsync(p, click);
@@ -287,6 +300,15 @@ internal sealed class DeckForm : Form
         _status.Items.Add(new ToolStripStatusLabel("·") { ForeColor = Theme.Muted });
         _voteStatus.ForeColor = Theme.Muted;
         _status.Items.Add(_voteStatus);
+        _status.Items.Add(new ToolStripStatusLabel { Spring = true });
+        _diagStatus.ForeColor = Theme.Muted;
+        _diagStatus.ToolTipText = Theme.Wrap("O jogo não carrega? Gera na Área de trabalho um .zip com o log da carga de cada conta, prints e as " +
+                                             "informações do PC e da rede (sem senha, token nem cookie), para mandar a quem cuida do deck.");
+        _diagStatus.Click += async (_, _) => await CreateDiagnosticAsync();
+        _status.Items.Add(_diagStatus);
+        // A assinatura, no fim da barra de baixo.
+        _status.Items.Add(new ToolStripStatusLabel("·") { ForeColor = Theme.Muted });
+        _status.Items.Add(new ToolStripStatusLabel("by: artbruno") { ForeColor = Theme.Muted });
     }
 
     protected override async void OnShown(EventArgs e)
@@ -306,6 +328,7 @@ internal sealed class DeckForm : Form
                 Close();
                 return;
             }
+            Diag.Write("ERRO ao abrir o navegador embutido: " + ex);
             DeckBox.Show(this, "Não consegui abrir o navegador embutido.\n\n" + ex.Message, Text, DeckBoxIcon.Error);
         }
     }
@@ -320,6 +343,8 @@ internal sealed class DeckForm : Form
 
         var options = new CoreWebView2EnvironmentOptions(BrowserArguments) { AreBrowserExtensionsEnabled = true };
         _env = await CoreWebView2Environment.CreateAsync(null, Path.Combine(_root, "WebView2"), options);
+        Diag.Write(Diag.Summary(_env) + $" · ligadas: {string.Join(", ", _panes.Where(p => !_config.Off[p.Index]).Select(p => p.ProfileName))}");
+        _env.BrowserProcessExited += (_, e) => Diag.Write($"o navegador interno FECHOU: {e.BrowserProcessExitKind} (processo {e.BrowserProcessId})");
 
         // Conta desligada nem cria o navegador: só abre quando for ligada.
         foreach (var pane in _panes.Where(p => _config.Off[p.Index]))
@@ -371,6 +396,9 @@ internal sealed class DeckForm : Form
     // A Kick de mentira do autoteste: o saldo de cada canal e cada resgate pedido ("canal bônus login corpo").
     private readonly Dictionary<string, int> _fakePoints = new();
     private readonly List<string> _fakeRedeems = new();
+
+    // Os bônus pausados no canal, na Kick e na Twitch de mentira (pelo id).
+    private readonly HashSet<string> _fakePausedRewards = new();
 
     // Quem está logado na Kick de mentira: no canal com o mesmo nome é o dono (pontos infinitos).
     private string _fakeKickMe = "fulano_kick";
@@ -471,7 +499,10 @@ internal sealed class DeckForm : Form
         "points" => $"{{\"data\":{{\"points\":{_fakePoints.GetValueOrDefault(channel)}}},\"message\":\"OK\"}}",
         "rewards" => JsonSerializer.Serialize(new
         {
-            data = FakeKickRewards.Select(r => new { id = r.Id, title = r.Title, cost = r.Cost, description = r.Description, is_enabled = true, is_paused = false }),
+            data = FakeKickRewards.Select(r => new
+            {
+                id = r.Id, title = r.Title, cost = r.Cost, description = r.Description, is_enabled = true, is_paused = _fakePausedRewards.Contains(r.Id),
+            }),
         }),
         _ => null,
     };
@@ -617,7 +648,7 @@ internal sealed class DeckForm : Form
                         {
                             customRewards = FakeTwitchRewards.Select(r => new
                             {
-                                r.id, r.title, r.prompt, r.cost, isEnabled = true, isPaused = false, isInStock = true,
+                                r.id, r.title, r.prompt, r.cost, isEnabled = true, isPaused = _fakePausedRewards.Contains(r.id), isInStock = true,
                                 cooldownExpiresAt = (string?)null,
                             }),
                         },
@@ -666,6 +697,8 @@ internal sealed class DeckForm : Form
         for (int i = 0; i < Accounts; i++)
             CloseLives(i);
         _fakePubSub?.Dispose();
+        foreach (var pane in _panes)
+            pane.Diag?.Flush();
         base.OnFormClosing(e);
     }
 
@@ -674,8 +707,9 @@ internal sealed class DeckForm : Form
     private void RestoreWindowBounds()
     {
         var saved = _config.WindowBounds is { Length: 4 } b ? new Rectangle(b[0], b[1], b[2], b[3]) : Rectangle.Empty;
-        // O autoteste abre num monitor que não é o principal (onde o usuário joga), quando tem mais de um. As outras
-        // janelas do deck (lives, popups, registro) abrem na tela da janela principal e vão junto.
+        // O autoteste abre na Área de trabalho 2 do Windows (TestDesktop leva para lá cada janela que o deck mostra); sem
+        // ela, num monitor que não é o principal (onde o usuário joga), quando tem mais de um. As outras janelas do deck
+        // (lives, popups, registro) abrem na tela da janela principal e vão junto.
         if (_selfTest)
         {
             var area = (Screen.AllScreens.FirstOrDefault(s => !s.Primary) ?? Screen.PrimaryScreen!).WorkingArea;
@@ -1050,9 +1084,21 @@ internal sealed class DeckForm : Form
         if (_seconds % 30 == 0)
             foreach (var pane in _panes)
                 _ = pane.CheckLoginScreenAsync();
+        // O jogo que não abre (preso na tela de abertura, ou a página que não carregou): recarrega a conta.
+        if (_seconds % 5 == 2)
+            foreach (var pane in _panes)
+                _ = pane.CheckGameOpenAsync();
         if (_seconds % 2 == 0)
             foreach (var pane in _panes.Where(p => p.RestockConfig.On || _restockWindows[p.Index] is not null))
                 _ = RefreshRestockAsync(pane.Index);
+        // A fila de PvP: o ⚔ a cada 5 s com ela ligada.
+        if (_seconds % 5 == 3)
+            foreach (var pane in _panes.Where(p => p.PvpOn))
+                _ = RefreshPvpAsync(pane.Index);
+        // O bônus das lives no jogo (a dica do cabeçalho e a guarda do bônus): a cada 30 s.
+        if (!_selfTest && _seconds % 30 == 10)
+            foreach (var pane in _panes.Where(p => !p.Off))
+                _ = RefreshBonusAsync(pane.Index);
         if (!_selfTest && !_liveChecking && DateTime.Now >= _liveCheckAt && _lives.Any(l => l is not null))
             _ = CheckLivesAsync();
         if (!_selfTest && _seconds % 30 == 15)
@@ -1440,16 +1486,30 @@ internal sealed class DeckForm : Form
         var menu = new ContextMenuStrip();
         menu.Items.Add(_config.Layout == DeckLayout.Focus && _config.Focused == index ? "Voltar para a grade" : "Ampliar no deck",
             null, (_, _) => ToggleFocus(index));
-        menu.Items.Add("Recarregar a página", null, (_, _) => pane.Reload());
+        menu.Items.Add("Recarregar limpo (sem o cache do jogo)", null, (_, _) => _ = pane.ReloadCleanAsync());
         menu.Items.Add(pane.Muted ? "Ligar o som" : "Desligar o som", null, (_, _) => pane.SetMuted(!pane.Muted));
         menu.Items.Add("Renomear…", null, (_, _) => RenameAccount(index));
+        menu.Items.Add(new ToolStripMenuItem("Apagar os dados da conta (entrar de novo)…", null, async (_, _) => await WipeAccountAsync(index))
+        {
+            Enabled = !pane.Off && pane.Core is not null,
+        });
         menu.Items.Add(pane.Off ? "Ligar esta conta" : "Desligar esta conta (fica no deck, sem rodar nada)",
             null, async (_, _) => await SetPaneOffAsync(index, !pane.Off));
+        menu.Items.Add("🩺 Gerar o diagnóstico (o arquivo para mandar quando o jogo não carrega)…", null, async (_, _) => await CreateDiagnosticAsync());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("Lives da Twitch/Kick nesta conta", null, async (_, _) => await ToggleLivesAsync(index))
         {
             Checked = _config.LivesAccounts.Contains(index + 1),
         });
+        // O carrinho e o ⚔ também aqui: em colunas, desligados, eles saem do cabeçalho para os outros botões caberem.
+        if (!pane.Off)
+        {
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("Recompra…", null, (_, _) => ShowRestockWindow(index));
+            var pvpMenu = new ToolStripMenuItem("⚔ Fila de PvP") { Checked = _config.Pvp[index] };
+            FillPvpMenu(index, pvpMenu.DropDownItems);
+            menu.Items.Add(pvpMenu);
+        }
         menu.Closed += (_, _) => BeginInvoke(menu.Dispose);
         menu.Show(Cursor.Position);
     }
@@ -1542,6 +1602,313 @@ internal sealed class DeckForm : Form
         }
     }
 
+    // ---------- Fila de PvP ----------
+
+    /// <summary>Liga ou desliga a fila de PvP da conta (o ⚔ do cabeçalho e o menu da conta); vale na hora.</summary>
+    private async Task SetPvpAsync(int index, bool on)
+    {
+        _config.Pvp[index] = on;
+        _panes[index].PvpOn = on;
+        SaveConfig();
+        await _panes[index].PushPvpAsync();
+        await RefreshPvpAsync(index);
+    }
+
+    /// <summary>
+    /// Como as partidas da fila aparecem na conta (completa, mini ou off) e a velocidade delas (0 = a do jogo); vale na
+    /// próxima partida, com a fila ligada.
+    /// </summary>
+    private async Task SetPvpViewAsync(int index, string screen, double speed)
+    {
+        _config.PvpScreen[index] = _panes[index].PvpScreen = PvpScreens.Normalized(screen);
+        _config.PvpSpeed[index] = _panes[index].PvpSpeed = PvpScreens.NormalizedSpeed(speed);
+        SaveConfig();
+        await _panes[index].PushPvpAsync();
+        await RefreshPvpAsync(index);
+    }
+
+    /// <summary>Botão direito no ⚔ do cabeçalho: ligar a fila, a tela das partidas e a velocidade.</summary>
+    private void ShowPvpMenu(int index)
+    {
+        var menu = new ContextMenuStrip();
+        FillPvpMenu(index, menu.Items);
+        menu.Closed += (_, _) => BeginInvoke(menu.Dispose);
+        menu.Show(_panes[index].PvpMenuPoint, ToolStripDropDownDirection.BelowLeft);
+    }
+
+    /// <summary>O menu da fila de PvP (o botão direito no ⚔ e o "⚔ Fila de PvP" do menu da conta).</summary>
+    private void FillPvpMenu(int index, ToolStripItemCollection items)
+    {
+        string screen = PvpScreens.Normalized(_config.PvpScreen[index]);
+        double speed = PvpScreens.NormalizedSpeed(_config.PvpSpeed[index]);
+        items.Add(new ToolStripMenuItem("Fila ligada (entra de novo depois de cada partida)", null,
+            (_, _) => _ = SetPvpAsync(index, !_config.Pvp[index])) { Checked = _config.Pvp[index] });
+        items.Add(new ToolStripSeparator());
+        items.Add(new ToolStripMenuItem("Partidas da fila:") { Enabled = false });
+        // Economia ou ULTRA: o jogo esconde as partidas de qualquer jeito; o menu avisa antes da escolha.
+        if (PvpScreens.NoSceneNote(_panes[index].PvpNoScene) is string noScene)
+            items.Add(new ToolStripMenuItem("⚠ " + (_panes[index].PvpNoScene == "economia"
+                ? "Battery Saver ligado: mostrar ou minimizar desliga ele com a fila ligada (o deck religa ao esconder)"
+                : "Tela ULTRA ligada: o jogo esconde as partidas assim mesmo"))
+            {
+                Enabled = false, ToolTipText = noScene,
+            });
+        foreach (var (value, text) in new[]
+                 {
+                     (PvpScreens.Full, "Mostrar a luta (o replay na tela)"),
+                     (PvpScreens.Mini, "Minimizada (a janelinha do canto)"),
+                     (PvpScreens.Off, "Escondida (só o aviso do resultado)"),
+                 })
+            items.Add(new ToolStripMenuItem(text, null, (_, _) => _ = SetPvpViewAsync(index, value, _config.PvpSpeed[index]))
+            {
+                Checked = screen == value,
+            });
+        items.Add(new ToolStripSeparator());
+        items.Add(new ToolStripMenuItem("Velocidade da luta (mostrada ou minimizada):") { Enabled = false });
+        items.Add(new ToolStripMenuItem("A do jogo (acelera só para caber até a próxima)", null,
+            (_, _) => _ = SetPvpViewAsync(index, _config.PvpScreen[index], 0)) { Checked = speed == 0, Enabled = screen != PvpScreens.Off });
+        foreach (double s in PvpScreens.Speeds)
+            items.Add(new ToolStripMenuItem(PvpScreens.SpeedLabel(s), null, (_, _) => _ = SetPvpViewAsync(index, _config.PvpScreen[index], s))
+            {
+                Checked = speed == s, Enabled = screen != PvpScreens.Off,
+            });
+        items.Add(new ToolStripSeparator());
+        items.Add(new ToolStripMenuItem($"Usar nas outras contas (partidas {PvpScreens.Label(screen)}s" +
+                                        (screen == PvpScreens.Off ? "" : $", {PvpScreens.SpeedLabel(speed)}") + ")", null, async (_, _) =>
+        {
+            for (int i = 0; i < Accounts; i++)
+                if (i != index)
+                    await SetPvpViewAsync(i, screen, speed);
+        }));
+    }
+
+    /// <summary>Lê da página a fila de PvP para o ⚔ do cabeçalho.</summary>
+    private async Task RefreshPvpAsync(int index)
+    {
+        if (_pvpBusy[index])
+            return;
+        _pvpBusy[index] = true;
+        try
+        {
+            _panes[index].ShowPvp(await _panes[index].ReadPvpAsync());
+        }
+        finally
+        {
+            _pvpBusy[index] = false;
+        }
+    }
+
+    // ---------- O jogo que não abre ----------
+
+    /// <summary>Anota em aberturas.log (pasta do deck) cada vez que uma conta recarregou porque o jogo não abriu.</summary>
+    private void LogOpening(AccountPane pane, string text)
+    {
+        try
+        {
+            var path = Path.Combine(_root, "aberturas.log");
+            if (File.Exists(path) && new FileInfo(path).Length > 256 * 1024)
+                File.WriteAllLines(path, File.ReadAllLines(path).TakeLast(500));
+            File.AppendAllText(path, $"{DateTime.Now:dd/MM/yy HH:mm:ss}  {pane.AccountName} · {text}{Environment.NewLine}");
+        }
+        catch (IOException)
+        {
+            // Fica para a próxima.
+        }
+    }
+
+    // ---------- Guarda do bônus: o bônus escolhido não vence com pontos parados em outros canais ----------
+
+    private readonly bool[] _bonusBusy = new bool[Accounts];
+
+    /// <summary>
+    /// Lê o bônus das lives no jogo (o bonus.js da página): o tempo que falta vai para a dica do cabeçalho, e a guarda do
+    /// bônus age se ele está vencendo.
+    /// </summary>
+    private async Task RefreshBonusAsync(int index)
+    {
+        if (_bonusBusy[index])
+            return;
+        _bonusBusy[index] = true;
+        try
+        {
+            var pane = _panes[index];
+            if (Bonus.Parse(await pane.ReadBonusAsync()) is not BonusSummary summary)
+            {
+                pane.ShowInfoTip(null);
+                return;
+            }
+            pane.ShowInfoTip(BonusLine(index, summary));
+            await GuardBonusAsync(index, summary);
+        }
+        finally
+        {
+            _bonusBusy[index] = false;
+        }
+    }
+
+    /// <summary>O tempo que falta do bônus escolhido em cada site, para a dica do cabeçalho; null sem bônus escolhido.</summary>
+    private string? BonusLine(int index, BonusSummary summary)
+    {
+        var parts = new List<string>();
+        foreach (var (site, info, reward) in new[]
+                 {
+                     (LiveSite.Twitch, summary.Twitch, _config.RedeemTwitch[index]), (LiveSite.Kick, summary.Kick, _config.RedeemKick[index]),
+                 })
+        {
+            if (reward is not KickReward r || info is null)
+                continue;
+            int left = info.Left.GetValueOrDefault(BonusGuard.Kind(r));
+            parts.Add($"{site} {BonusGuard.KindName(r)}: " + (!info.Linked ? "não vinculada no jogo" : left > 0 ? BonusGuard.Time(left) : "vencido"));
+        }
+        return parts.Count == 0 ? null : "Bônus das lives: " + string.Join(" · ", parts) + (_config.BonusGuard[index] ? " (guarda do bônus ligada)" : "");
+    }
+
+    /// <summary>
+    /// A guarda do bônus da conta (<see cref="BonusGuard"/>), a cada leitura do bônus: em cada site com bônus escolhido,
+    /// vinculado no jogo e vencendo em menos de 30 min, lê o saldo dos canais fora das lives abertas e resgata 1 no
+    /// escolhido, pelo mesmo script do resgate automático, numa página escondida do canal. Depois confere no jogo se o
+    /// tempo do bônus subiu; se não subir, para a guarda naquele site por 1 h e diz no registro.
+    /// </summary>
+    private async Task GuardBonusAsync(int index, BonusSummary summary)
+    {
+        if (_env is null || !_config.BonusGuard[index] || _panes[index].Off || !summary.Connected)
+            return;
+        foreach (var site in new[] { LiveSite.Twitch, LiveSite.Kick })
+        {
+            var reward = site == LiveSite.Kick ? _config.RedeemKick[index] : _config.RedeemTwitch[index];
+            var info = site == LiveSite.Kick ? summary.Kick : summary.Twitch;
+            var redeemer = site == LiveSite.Kick ? _redeemKick[index] : _redeemTwitch[index];
+            if (reward is not KickReward r || info is not { Linked: true } || redeemer.Stopped is not null)
+                continue;
+            var slot = _guard.SlotOf(index, site);
+            if (slot.Busy || DateTime.Now < slot.HoldUntil)
+                continue;
+            string kind = BonusGuard.KindName(r);
+            int left = info.Left.GetValueOrDefault(BonusGuard.Kind(r));
+            void Log(string text) => _redeemLog.Add(index, _config.AccountNames[index], site, text);
+            // O último resgate da guarda: o jogo tem de mostrar o tempo a mais (1 h ou mais).
+            if (slot.RedeemedAt is DateTime at)
+            {
+                double since = (DateTime.Now - at).TotalSeconds;
+                if (left > slot.LeftBefore - since + 1800)
+                    slot.RedeemedAt = null;
+                else if (DateTime.Now - at > _guard.ConfirmWithin)
+                {
+                    slot.RedeemedAt = null;
+                    slot.HoldUntil = DateTime.Now.AddHours(1);
+                    Log($"guarda do bônus: o resgate das {at:HH:mm} não somou no bônus de {kind} do jogo ({site} vinculada?); paro a guarda aqui por 1 h");
+                    continue;
+                }
+                else
+                    continue;
+            }
+            if (left > _guard.Threshold.TotalSeconds)
+            {
+                slot.NoneNoted = false;
+                continue;
+            }
+            slot.Busy = true;
+            try
+            {
+                string? token, device = null;
+                if (site == LiveSite.Kick)
+                    token = await ReadKickTokenAsync(index);
+                else
+                    (token, device) = await ReadTwitchLoginAsync(index);
+                if (token is null)
+                    continue;
+                var candidates = BonusGuard.Candidates(_config.Channels(site), info, _lives[index]?.Channels(site) ?? Enumerable.Empty<string>());
+                foreach (var channel in candidates.Where(c => _guard.Stale(slot, c)))
+                    BonusGuard.Remember(slot, channel, site == LiveSite.Kick
+                        ? await PointsRedeemer.KickReadAsync(KickReadApi, channel, token, r)
+                        : await PointsRedeemer.TwitchReadAsync(TwitchReadApi, channel, token, device, r));
+                string when = left > 0 ? $"vence em {BonusGuard.Time(left)}" : "venceu";
+                if (BonusGuard.Pick(slot, candidates, info) is not { } pick)
+                {
+                    if (!slot.NoneNoted)
+                    {
+                        slot.NoneNoted = true;
+                        Log($"guarda do bônus: o de {kind} {when}, e nenhum canal fora das lives abertas tem os pontos ({candidates.Count} conferidos)");
+                    }
+                    slot.HoldUntil = DateTime.Now.AddMinutes(10);
+                    continue;
+                }
+                var (chosen, points, _, live) = pick;
+                Log($"{chosen}: guarda do bônus: o de {kind} {when}; resgato aqui ({points} pontos" + (live ? ")" : ", canal offline)"));
+                string script = site == LiveSite.Kick
+                    ? redeemer.KickScript(KickApi, chosen, token, r)
+                    : redeemer.TwitchScript(TwitchApi, chosen, token, device, r, claim: false);
+                string result = await RunInChannelAsync(index, site, chosen, script);
+                if (redeemer.Apply(chosen, result) is string note)
+                    _panes[index].Note(note);
+                slot.Reads.Remove(chosen);
+                if (result.Contains("\"redeemed\":true"))
+                {
+                    slot.RedeemedAt = DateTime.Now;
+                    slot.LeftBefore = left;
+                    slot.NoneNoted = false;
+                    slot.HoldUntil = DateTime.Now.AddMinutes(1);
+                }
+                else
+                {
+                    Log($"{chosen}: guarda do bônus: o resgate não passou ({(result.Length == 0 ? "a página do canal não respondeu" : result)}); tento de novo em 10 min");
+                    slot.HoldUntil = DateTime.Now.AddMinutes(10);
+                }
+            }
+            finally
+            {
+                slot.Busy = false;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Roda o script num canal que não está aberto na conta: a página do canal (o player parado, sem vídeo; abre mesmo
+    /// offline) escondida, no perfil da conta, só pelo tempo do script. Devolve o texto que ele entrega ("" sem resposta).
+    /// </summary>
+    private async Task<string> RunInChannelAsync(int index, LiveSite site, string channel, string script)
+    {
+        if (_env is null)
+            return "";
+        string url = site == LiveSite.Kick
+            ? KickUrl(channel) + (KickUrl(channel).Contains('?') ? "&" : "?") + TwitchLive.Still
+            : TwitchUrl(channel) + "&" + TwitchLive.Still;
+        var view = new Microsoft.Web.WebView2.WinForms.WebView2 { Visible = false, DefaultBackgroundColor = Theme.Back };
+        Controls.Add(view);
+        try
+        {
+            var options = _env.CreateCoreWebView2ControllerOptions();
+            options.ProfileName = _panes[index].ProfileName;
+            _ = view.Handle;
+            await view.EnsureCoreWebView2Async(_env, options);
+            var core = view.CoreWebView2;
+            core.IsMuted = true;
+            SelfTestSetup?.Invoke(core);
+            var loaded = new TaskCompletionSource<bool>();
+            core.NavigationCompleted += (_, e) => loaded.TrySetResult(e.IsSuccess);
+            core.Navigate(url);
+            if (await Task.WhenAny(loaded.Task, Task.Delay(TimeSpan.FromSeconds(30))) != loaded.Task || !loaded.Task.Result)
+                return "";
+            var call = core.CallDevToolsProtocolMethodAsync("Runtime.evaluate",
+                JsonSerializer.Serialize(new { expression = script, awaitPromise = true, returnByValue = true }));
+            if (await Task.WhenAny(call, Task.Delay(TimeSpan.FromSeconds(45))) != call)
+                return "";
+            using var doc = JsonDocument.Parse(await call);
+            return doc.RootElement.TryGetProperty("result", out var value) && value.TryGetProperty("value", out var text)
+                   && text.ValueKind == JsonValueKind.String ? text.GetString()! : "";
+        }
+        catch
+        {
+            // A página fechou no meio, ou o deck está fechando.
+            return "";
+        }
+        finally
+        {
+            Controls.Remove(view);
+            view.Dispose();
+        }
+    }
+
     private void RenameAccount(int index)
     {
         var name = Prompt.Ask(this, "Renomear conta", "Nome que aparece no deck (por exemplo, o nick do jogo):", _config.AccountNames[index], "Salvar");
@@ -1552,6 +1919,89 @@ internal sealed class DeckForm : Form
         _panes[index].RefreshHeader();
         SaveConfig();
         UpdateBar();
+    }
+
+    /// <summary>
+    /// Apaga os dados da conta para ela entrar de novo (a conta que trava depois da carga mesmo recarregando limpo): só os do
+    /// jogo, ou tudo (sai da Twitch e da Kick também). As lives abertas da conta fecham no "tudo" e abrem de novo sem login.
+    /// </summary>
+    private async Task WipeAccountAsync(int index)
+    {
+        var pane = _panes[index];
+        int choice = DeckBox.Choose(this,
+            $"Apagar os dados de {pane.AccountName}?\n\n" +
+            "Apagar o jogo: sai da conta do jogo e apaga tudo o que o site guarda nesta conta do deck (login, id do aparelho, " +
+            "cookies, cache e service workers). O jogo abre na tela de login: entre de novo com o e-mail e a senha.\n\n" +
+            "Apagar tudo: o mesmo e os cookies de todos os sites, então sai também da Twitch e da Kick (o resgate dos pontos " +
+            "e as lives desta conta pedem o login de novo).\n\n" +
+            "As extensões, as configurações delas e as do deck (nome, recompra, fila de PvP) ficam.",
+            "Apagar os dados da conta", "Apagar o jogo", "Apagar tudo", danger: true);
+        if (choice == 0)
+            return;
+        bool everything = choice == 2;
+        if (everything)
+            CloseLives(index);
+        bool ok = await pane.WipeAsync(everything);
+        pane.Note(ok ? "dados apagados: entre de novo na conta" : "não consegui apagar tudo: recarregando assim mesmo");
+        if (everything && _config.LivesAccounts.Contains(index + 1))
+            await OpenLivesAsync(index);
+    }
+
+    // ---------- 🩺 Diagnóstico: o jogo que não carrega ----------
+
+    private readonly ToolStripStatusLabel _diagStatus = new("🩺 Gerar diagnóstico");
+    private bool _diagBusy;
+
+    /// <summary>O deck agora, para o relatório do diagnóstico: as contas, as opções que mexem no jogo, as lives e o consumo.</summary>
+    private IEnumerable<string> DeckLines()
+    {
+        yield return "contas: " + string.Join("; ", _panes.Select(p => $"{p.ProfileName} {p.AccountName} {(_config.Off[p.Index] ? "desligada" : "ligada")}"));
+        yield return $"zoom {_config.Zoom[0]:0.##}; menos animações {_config.ReduceMotion}; quadros {_config.GameFps}/s; sprites {_config.SpriteMs} ms; " +
+                     $"ULTRA {_config.Ultra}; layout {_config.Layout}";
+        yield return "lives nas contas: " + string.Join(", ", _config.LivesAccounts) + $"; Twitch {_config.TwitchLives}, Kick {_config.KickLives}";
+        yield return "automações ligadas: " + string.Join("; ", _panes.Select(p =>
+            $"{p.ProfileName} recompra={_config.Restock[p.Index].On} pvp={_config.Pvp[p.Index]} guarda do bônus={_config.BonusGuard[p.Index]}"));
+        yield return Diag.Cut($"consumo: {_ram.Text} {_ram.ToolTipText}", 600);
+    }
+
+    /// <summary>
+    /// 🩺 Gerar diagnóstico (a barra de baixo e o menu da conta): o .zip na Área de trabalho, para a pessoa do PC onde o jogo
+    /// não carrega mandar, e abre o Explorer nele.
+    /// </summary>
+    private async Task CreateDiagnosticAsync()
+    {
+        if (_diagBusy)
+            return;
+        _diagBusy = true;
+        _diagStatus.Text = "🩺 gerando o diagnóstico…";
+        try
+        {
+            string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+            string folder = Directory.Exists(desktop) ? desktop : _root;
+            string zip = await Diag.CreateReportAsync(folder, _env, _panes, DeckLines().ToList(), _root, outside: true);
+            DeckBox.Show(this,
+                $"Pronto: {Path.GetFileName(zip)}, na {(folder == desktop ? "Área de trabalho" : folder)}.\n\n" +
+                "Mande este arquivo para quem cuida do deck. Ele tem o log da carga do jogo de cada conta, prints das contas e as " +
+                "informações do PC e da rede; não tem senha, token nem cookie.", Text);
+            try
+            {
+                Process.Start("explorer.exe", $"/select,\"{zip}\"");
+            }
+            catch
+            {
+                // Sem o Explorer, o caminho está na caixa.
+            }
+        }
+        catch (Exception ex)
+        {
+            Diag.Write("ERRO ao gerar o diagnóstico: " + ex);
+            DeckBox.Show(this, "Não consegui gerar o diagnóstico.\n\n" + ex.Message, Text, DeckBoxIcon.Error);
+        }
+        finally
+        {
+            _diagStatus.Text = "🩺 Gerar diagnóstico";
+            _diagBusy = false;
+        }
     }
 
     // ---------- Extensões ----------
@@ -2752,7 +3202,14 @@ internal sealed class DeckForm : Form
         _bulkWindow = new BulkRedeemDialog(_env, accounts, account,
             site => site == LiveSite.Kick ? KickApi : TwitchApi,
             (site, channel) => site == LiveSite.Kick ? KickUrl(channel) : TwitchUrl(channel), SelfTestSetup,
-            (i, site, text) => _redeemLog.Add(i, _config.AccountNames[i], site, text));
+            (i, site, text) =>
+            {
+                _redeemLog.Add(i, _config.AccountNames[i], site, text);
+                // O lote gasta por fora do resgate automático: a próxima conferência do canal começa do saldo novo.
+                int colon = text.IndexOf(':');
+                if (colon > 0)
+                    (site == LiveSite.Kick ? _redeemKick : _redeemTwitch)[i].Forget(text[..colon]);
+            });
         _bulkWindow.Show(this);
     }
 
@@ -2805,9 +3262,11 @@ internal sealed class DeckForm : Form
     private async Task EditChannelsAsync()
     {
         using var dialog = new ChannelsDialog(_config.TwitchChannels, _config.KickChannels, _config.TwitchLives, _config.KickLives,
-            _config.AccountNames, _config.RedeemKick, _config.RedeemTwitch, _config.ClaimTwitchBonus, _config.TwitchLight, _config.KickLight);
+            _config.AccountNames, _config.RedeemKick, _config.RedeemTwitch, _config.ClaimTwitchBonus, _config.BonusGuard);
         if (dialog.ShowDialog(this) != DialogResult.OK)
             return;
+        _config.BonusGuard = dialog.BonusGuard;
+        _guard.Restart();
         _config.TwitchChannels = dialog.TwitchChannels;
         _config.KickChannels = dialog.KickChannels;
         _config.TwitchLives = Math.Clamp(dialog.TwitchLives, 0, TwitchLive.MaxSlots);
@@ -2818,8 +3277,6 @@ internal sealed class DeckForm : Form
         _config.RedeemKick = dialog.RedeemKick;
         _config.RedeemTwitch = dialog.RedeemTwitch;
         _config.ClaimTwitchBonus = dialog.ClaimTwitchBonus;
-        _config.TwitchLight = dialog.TwitchLight;
-        _config.KickLight = dialog.KickLight;
         foreach (var redeemer in _redeemKick.Concat(_redeemTwitch))
             redeemer.Restart();
         SaveConfig();
@@ -2861,12 +3318,35 @@ internal sealed class DeckForm : Form
         File.WriteAllText(Path.Combine(site, "game.html"),
             "<!doctype html><title>Jogo-teste</title><body style='background:#234;color:#fff'>jogo<nav>" +
             "<button onclick='window.__mapa = (window.__mapa || 0) + 1'>Mapa</button> " +
-            "<button onclick='window.__outro = (window.__outro || 0) + 1'>Outro</button></nav></body>");
+            "<button onclick='window.__outro = (window.__outro || 0) + 1'>Outro</button></nav>" +
+            "<div id='chat-msgs'></div><script>document.getElementById('chat-msgs').addEventListener('click', e => {" +
+            " const l = e.target.closest('.m-pk-link'); if (l) window.__ficha = l.dataset.nick + ':' + l.dataset.pk; });</script></body>");
         // O player da Twitch de teste, com o vídeo "tocando" (o tempo anda).
         File.WriteAllText(Path.Combine(site, "twitch.html"),
             "<!doctype html><title>Twitch-teste</title><video muted></video><script>const v = document.querySelector('video');" +
             " Object.defineProperty(v, 'paused', { get: () => false });" +
             " Object.defineProperty(v, 'currentTime', { get: () => performance.now() / 1000 });</script>");
+        // O replay das partidas de PvP, como os do jogo (/replay.mjs e /replay-tabuleiro.mjs): a velocidade é por replay.
+        File.WriteAllText(Path.Combine(site, "replay.mjs"), """
+            export const VELOCIDADES = [1, 2, 4, 8];
+            export class ReplayGuerra {
+              constructor(canvas, rep, { mini = false } = {}) { this.vel = 1; this.mini = !!mini; this.tocando = false; }
+              iniciar() { return Promise.resolve(this); }
+              tocar() { this.tocando = true; return this; }
+              velocidade(v, { livre = false } = {}) {
+                const n = Number(v);
+                this.vel = livre && n > 0 ? Math.min(32, Math.max(0.25, n)) : VELOCIDADES.includes(n) ? n : 1;
+                return this.vel;
+              }
+            }
+            """);
+        File.WriteAllText(Path.Combine(site, "replay-tabuleiro.mjs"), """
+            import { ReplayGuerra } from './replay.mjs';
+            export class ReplayTabuleiro extends ReplayGuerra {
+              iniciar() { return super.iniciar(); }
+              tocar() { this.tocando = true; return this; }
+            }
+            """);
         // As poções e os revives do espelho de itens do jogo (/assets/items.json), que a recompra lê.
         Directory.CreateDirectory(Path.Combine(site, "assets"));
         File.WriteAllText(Path.Combine(site, "assets", "items.json"), """
@@ -3077,10 +3557,82 @@ internal sealed class DeckForm : Form
                 loginInfo.Contains("tela de login") && !_panes[1].HeaderInfo.Contains("tela de login") && !_panes[0].HeaderInfo.Contains("tela de login"),
                 $"com login='{loginInfo}' sem='{_panes[1].HeaderInfo}'");
 
+            // O jogo que não abre: a página carregou mas ficou na tela de abertura (o jogo-teste não conecta nem mostra o
+            // login) além do tempo; a conta recarrega sozinha e anota em aberturas.log. Com o login à vista, o jogo abriu:
+            // para de vigiar e zera a contagem.
+            var stuckPane = _panes[1];
+            var openingLog = Path.Combine(_root, "aberturas.log");
+            stuckPane.LoadTimeout = TimeSpan.FromSeconds(1);
+            int loadsBefore = stuckPane.Loads;
+            stuckPane.Reload();
+            await WaitFor(() => stuckPane.Loads > loadsBefore && stuckPane.Status == PaneStatus.Ok, 15);
+            await Task.Delay(1200);
+            await stuckPane.CheckGameOpenAsync();
+            int stuckReloads = stuckPane.StuckReloads;
+            bool stuckReloaded = await WaitFor(() => stuckPane.Loads > loadsBefore + 1 && stuckPane.Status == PaneStatus.Ok, 15);
+            await Eval(stuckPane, "document.body.insertAdjacentHTML('beforeend', '<div id=login>login</div>'); 1");
+            await stuckPane.CheckGameOpenAsync();
+            int stuckAfterLogin = stuckPane.StuckReloads;
+            await Task.Delay(2500);
+            await stuckPane.CheckGameOpenAsync();
+            int stuckLoads = stuckPane.Loads - loadsBefore;
+            await Eval(stuckPane, "document.querySelector('#login').remove(); 1");
+            // Com o aviso "conta aberta em outro lugar" por cima da tela de abertura, não recarrega (tomaria a sessão do
+            // outro aparelho): para de vigiar e avisa no cabeçalho.
+            int loadsTaken = stuckPane.Loads;
+            stuckPane.Reload();
+            await WaitFor(() => stuckPane.Loads > loadsTaken && stuckPane.Status == PaneStatus.Ok, 15);
+            await Eval(stuckPane, "document.body.insertAdjacentHTML('beforeend', '<div id=sessao-tomada class=modal>Sua conta foi aberta em outro lugar</div>'); 1");
+            await Task.Delay(1200);
+            await stuckPane.CheckGameOpenAsync();
+            string takenNote = stuckPane.NoteText ?? "";
+            await Task.Delay(1500);
+            await stuckPane.CheckGameOpenAsync();
+            bool takenStays = stuckPane.StuckReloads == 0 && stuckPane.Loads == loadsTaken + 1;
+            await Eval(stuckPane, "document.querySelector('#sessao-tomada').remove(); 1");
+            stuckPane.LoadTimeout = null;
+            string openingText = File.Exists(openingLog) ? File.ReadAllText(openingLog) : "";
+            Check("jogo que não abre: preso na tela de abertura além do tempo, a conta recarrega sozinha; com o login à vista, para",
+                stuckReloads == 1 && stuckReloaded && stuckAfterLogin == 0 && stuckLoads == 2
+                && openingText.Contains("o jogo não abriu em 1 s (carga ?%): recarregando (1ª vez)")
+                && takenStays && takenNote.Contains("aberta em outro lugar: o deck não recarrega"),
+                $"recargas={stuckReloads} recarregou={stuckReloaded} depois do login={stuckAfterLogin} cargas={stuckLoads} " +
+                $"outro lugar={takenStays}/'{takenNote}' log='{openingText.Trim()}'");
+
+            // 🩺 Diagnóstico: o log da conta 2 tem o caminho da carga (a tela de abertura, o vigia com o retrato e o print) e os
+            // erros da página (JavaScript, console, o arquivo que não existe); o .zip leva tudo, com os nomes das chaves do
+            // localStorage mas sem os valores.
+            await Eval(stuckPane, "localStorage.setItem('chave-diag', 'segredo-diag'); setTimeout(() => { throw new Error('erro-de-teste-diag'); }); " +
+                                  "console.error('console-de-teste-diag'); fetch('https://deck.test/nao-existe-diag.js').catch(() => 0); 1");
+            await Task.Delay(1500);
+            string diagZip = await Diag.CreateReportAsync(_root, _env, _panes, DeckLines().ToList(), _root, outside: false);
+            var zipped = new System.Text.StringBuilder();
+            using (var archive = System.IO.Compression.ZipFile.OpenRead(diagZip))
+                foreach (var entry in archive.Entries.Where(e => !e.Name.EndsWith(".jpg")))
+                {
+                    using var entryReader = new StreamReader(entry.Open());
+                    zipped.Append($"[{entry.FullName}]\n").Append(entryReader.ReadToEnd());
+                }
+            File.Delete(diagZip);
+            await Eval(stuckPane, "localStorage.removeItem('chave-diag'); 1");
+            string diagText = zipped.ToString();
+            int diagShots = Directory.GetFiles(Diag.Folder, "conta2-*.jpg").Length;
+            var diagMissing = new[]
+                {
+                    "[relatorio.txt]", "[diagnostico/conta2.log]", "[diagnostico/deck.log]", "[aberturas.log]", "WebView2: em uso", "== conta2:",
+                    "tela: carga ?%", "retrato (o vigia vai recarregar)", "vigia: o jogo não abriu em 1 s", "tela: login",
+                    "erro-de-teste-diag", "console-de-teste-diag", "nao-existe-diag.js", "chave-diag",
+                }
+                .Where(t => !diagText.Contains(t)).ToList();
+            Check("diagnóstico: o log da conta tem a carga, o vigia com retrato e print e os erros da página; o .zip leva tudo sem os valores guardados",
+                diagMissing.Count == 0 && !diagText.Contains("segredo-diag") && diagShots >= 2,
+                $"faltou=[{string.Join(" | ", diagMissing)}] valor vazou={diagText.Contains("segredo-diag")} prints={diagShots}");
+
             // Recompra: o script do deck pega o socket que o jogo abre para o próprio site. No jogo-teste ele não
             // conecta, então o socket finge estar aberto, guarda o que seria mandado e recebe o welcome à mão.
-            // Ligada na conta 1 (Ultimate Potion, os valores de fábrica), ela arruma a fila do "Usar Poções" e
-            // compra o que falta, uma compra por vez; a conta 2, desligada, não compra nada.
+            // Ligada na conta 1 (Ultimate Potion; o resto, os valores de fábrica), ela arruma a fila do "Usar Poções",
+            // liga o "Usar Revive" nas Automações do jogo e compra o que falta, uma compra por vez; a conta 2, desligada,
+            // não compra nada. De fábrica a poção é a de melhor custo-benefício (e a recompra nunca configurada passa para ela).
             const string FakeSocket = """
                 (() => {
                   const ws = new WebSocket('wss://deck.test/');
@@ -3101,6 +3653,10 @@ internal sealed class DeckForm : Form
             async Task<string> Sent(AccountPane pane) => JsonSerializer.Deserialize<string>(await Eval(pane, SentScript)) ?? "";
             await Eval(_panes[0], FakeSocket);
             await Eval(_panes[1], FakeSocket);
+            bool potionDefault = new RestockConfig().Potions.Id == 0
+                && new RestockConfig { Potions = new() { On = true, Id = Restock.UltimatePotion, Keep = 5000, Below = 2000 } }.Normalized().Potions.Id == 0
+                && new RestockConfig { On = true, Potions = new() { On = true, Id = Restock.UltimatePotion, Keep = 5000, Below = 2000 } }.Normalized().Potions.Id == Restock.UltimatePotion;
+            _config.Restock[0].Potions.Id = Restock.UltimatePotion;
             _config.Restock[0].On = true;
             await ApplyRestockAsync(0);
             await Task.Delay(2500);
@@ -3115,10 +3671,25 @@ internal sealed class DeckForm : Form
             var notBought = await Sent(_panes[1]);
             await RefreshRestockAsync(0);
             await RefreshRestockAsync(1);
+            // As Automações do jogo: sem VIP, "Usar Revive" (e a fila das poções); com VIP, "Lançar sem parar" (no lugar do
+            // "até capturar") com a Ultra Ball, que ela compra, em 1º.
+            const string AutoSetScript = "JSON.stringify(window.__enviados.filter(m => m.t === 'auto.set').map(m => " +
+                                         "[m.potionIds, m.autoPotion, m.autoRevive, m.autoBallSemParar, m.autoBallAteCapturar, m.ballIds].join('/')))";
+            async Task<string> AutoSets() => JsonSerializer.Deserialize<string>(await Eval(_panes[0], AutoSetScript)) ?? "";
+            string autoNoVip = await AutoSets();
+            await Eval(_panes[0], "__msg({ t: 'estado', estado: { loja: { vip: true }, automation: { autoPotion: true, autoRevive: true, " +
+                                  "potionIds: [204, 200], hpLimiar: 0.3, autoBallAteCapturar: true, ballIds: [1] } } }); 1");
+            string autoVip = "";
+            for (int tries = 0; tries < 20 && !(autoVip = await AutoSets()).Contains("4,1"); tries++)
+                await Task.Delay(200);
             Check("recompra: arruma a fila das poções e compra poção, revive e pokebola, uma por vez (desligada não compra)",
                 firstBuy == "[\"fila:204,200\",\"item:204x4000\"]" && allBuys == "[\"fila:204,200\",\"item:204x4000\",\"item:205x450\",\"ball:4x9999\"]"
                 && notBought == "[]" && _panes[0].RestockState == "ligada" && _panes[1].RestockState == "desligada",
                 $"conta1={allBuys} (1ª={firstBuy}) conta2={notBought} carrinhos={_panes[0].RestockState},{_panes[1].RestockState}");
+            Check("recompra: liga nas Automações do jogo o que compra (revive; com VIP, lançar sem parar com a bola dela em 1º); poção de fábrica = custo-benefício",
+                potionDefault && autoNoVip == "[\"204,200/true/true///\"]"
+                && autoVip == "[\"204,200/true/true///\",\"204,200/true/true/true/false/4,1\"]",
+                $"fábrica={potionDefault} sem VIP={autoNoVip} com VIP={autoVip}");
 
             // A janela do carrinho: mostra a conta e a poção escolhida; desligar nela vale na hora, e a página que
             // recarrega recebe a configuração sozinha.
@@ -3155,6 +3726,198 @@ internal sealed class DeckForm : Form
             var own = await Eval(_panes[0], "localStorage.getItem('quem')");
             var other = await Eval(_panes[1], "localStorage.getItem('quem')");
             Check("cada conta com sessão própria", own == "\"conta1\"" && other == "null", $"conta1={own} conta2={other}");
+
+            // Apagar os dados da conta: "o jogo" leva o login do localStorage e os cookies do site do jogo, e a Twitch/Kick
+            // (kick.test) fica; "tudo" leva os cookies dos outros sites também. A outra conta não perde nada.
+            var wipePane = _panes[1];
+            var cookies = wipePane.Core!.CookieManager;
+            async Task<string> WipeState() =>
+                await Eval(wipePane, "localStorage.getItem('sessao')") + " deck=" + (await cookies.GetCookiesAsync("https://deck.test")).Count
+                + " kick=" + (await cookies.GetCookiesAsync("https://kick.test")).Count;
+            async Task<bool> WipeAndWait(bool everything)
+            {
+                int loads = wipePane.Loads;
+                bool done = await wipePane.WipeAsync(everything);
+                return done && await WaitFor(() => wipePane.Loads > loads && wipePane.Status == PaneStatus.Ok, 15);
+            }
+            await Eval(wipePane, "localStorage.setItem('sessao', '{\"nick\":\"teste\",\"token\":\"x\"}'); 1");
+            cookies.AddOrUpdateCookie(cookies.CreateCookie("cf_clearance", "1", "deck.test", "/"));
+            cookies.AddOrUpdateCookie(cookies.CreateCookie("session_token", "1", "kick.test", "/"));
+            string wipeBefore = await WipeState();
+            bool wipedGame = await WipeAndWait(false);
+            string wipeGame = await WipeState();
+            cookies.AddOrUpdateCookie(cookies.CreateCookie("cf_clearance", "1", "deck.test", "/"));
+            bool wipedAll = await WipeAndWait(true);
+            string wipeAll = await WipeState();
+            string wipeOther = await Eval(_panes[0], "localStorage.getItem('quem')");
+            Check("apagar os dados da conta: o jogo sai do login e dos cookies do site, a Kick fica; tudo leva a Kick; a outra conta fica",
+                wipeBefore == "\"{\\\"nick\\\":\\\"teste\\\",\\\"token\\\":\\\"x\\\"}\" deck=1 kick=1" && wipedGame && wipeGame == "null deck=0 kick=1"
+                && wipedAll && wipeAll == "null deck=0 kick=0" && wipeOther == "\"conta1\"" && wipePane.Wipes == 2,
+                $"antes={wipeBefore} jogo={wipedGame}/{wipeGame} tudo={wipedAll}/{wipeAll} conta1={wipeOther}");
+
+            // O socket fingido do jogo na conta 2 (o jogo-teste não conecta): o que a página manda vai para __pvpEnviados, e
+            // __pvpJogo entrega uma mensagem do jogo, como se viesse do servidor.
+            const string GameSocket = """
+                (() => {
+                  const ws = new WebSocket('wss://deck.test/pvp');
+                  Object.defineProperty(ws, 'readyState', { get: () => 1 });
+                  window.__pvpEnviados = [];
+                  ws.send = d => window.__pvpEnviados.push(JSON.parse(d));
+                  window.__pvpJogo = o => ws.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(o) }));
+                  window.__pvpJogo({ t: 'welcome', estado: { cheio: true, nick: 'teste', level: 45, xp: 1000000, gold: 500000 } });
+                  return 1;
+                })()
+                """;
+            var pvpPane = _panes[1];
+            await Eval(pvpPane, GameSocket);
+            const string PvpSentScript = "JSON.stringify(window.__pvpEnviados.map(m => m.t + (m.slug ? ':' + m.slug : '')))";
+            async Task<string> PvpSent() => JsonSerializer.Deserialize<string>(await Eval(pvpPane, PvpSentScript)) ?? "";
+            async Task<bool> PvpSentSoon(string what, int seconds)
+            {
+                var deadline = DateTime.Now.AddSeconds(seconds);
+                while (!(await PvpSent()).Contains(what) && DateTime.Now < deadline)
+                    await Task.Delay(150);
+                return (await PvpSent()).Contains(what);
+            }
+
+            // A fila de PvP (⚔): ligada, pergunta ao jogo se a conta está na fila e entra; depois de uma partida (e da espera
+            // que o jogo pede) entra de novo; desligada na fila, sai. Conta VIP: liga a auto-fila do jogo (e desliga junto).
+            await Eval(pvpPane, "window.__pvpEnviados.length = 0; localStorage.setItem('pvpTelaBatalha', 'completa'); 1");
+            await SetPvpAsync(1, true);
+            bool pvpEntered = await PvpSentSoon("pvp.fila.entrar", 5);
+            string pvpScreen = await Eval(pvpPane, "localStorage.getItem('pvpTelaBatalha')");
+            string pvpFirst = await PvpSent();
+            await Eval(pvpPane, "__pvpJogo({ t: 'pvp', fila: { na: true, desde: Date.now(), tamanho: 3 } }); 1");
+            await RefreshPvpAsync(1);
+            string pvpInQueue = pvpPane.PvpState;
+            await Eval(pvpPane, "window.__pvpEnviados.length = 0;" +
+                                 " __pvpJogo({ t: 'pvp', partida: { id: 1, venci: true, oponente: { nick: 'Rival', time: [1, 2] }, delta: 12, pontos: 1012 }, fila: { cooldownMs: 0 } }); 1");
+            bool pvpAgain = await PvpSentSoon("pvp.fila.entrar", 5);
+            await Eval(pvpPane, "__pvpJogo({ t: 'pvp', fila: { na: true, desde: Date.now(), tamanho: 2 } }); window.__pvpEnviados.length = 0; 1");
+            var pvpStatus = await pvpPane.ReadPvpAsync();
+            await SetPvpAsync(1, false);
+            bool pvpLeft = await PvpSentSoon("pvp.fila.sair", 3);
+            string pvpOff = pvpPane.PvpState;
+            await Eval(pvpPane, "window.__pvpEnviados.length = 0;" +
+                                 " __pvpJogo({ t: 'estado', estado: { loja: { vip: true }, automation: { hpLimiar: 0.3, pvpAutoFila: false } } }); 1");
+            await SetPvpAsync(1, true);
+            await PvpSentSoon("auto.set", 3);
+            await SetPvpAsync(1, false);
+            await Task.Delay(200);
+            string pvpAuto = JsonSerializer.Deserialize<string>(await Eval(pvpPane,
+                "JSON.stringify(window.__pvpEnviados.filter(m => m.t === 'auto.set').map(m => m.pvpAutoFila + '/' + m.hpLimiar))")) ?? "";
+            Check("pvp: a fila liga, entra de novo depois de cada partida e sai ao desligar; na conta VIP liga a auto-fila do jogo; as partidas não abrem na tela",
+                pvpEntered && pvpFirst == "[\"pvp.info\",\"pvp.fila.entrar\"]" && pvpInQueue == "na fila" && pvpAgain
+                && pvpStatus is { On: true, Na: true, Wins: 1, Losses: 0, Tamanho: 2, Hidden: true, LastMatch.Rival: "Rival" } && pvpLeft && pvpOff == "desligada" && !_config.Pvp[1]
+                && pvpAuto == "[\"true/0.3\",\"false/0.3\"]" && pvpScreen == "\"off\"",
+                $"1ª={pvpFirst} estado={pvpInQueue} de novo={pvpAgain} status={(pvpStatus is null ? "nada" : JsonSerializer.Serialize(pvpStatus))} " +
+                $"saiu={pvpLeft}/{pvpOff} vip={pvpAuto} tela da batalha={pvpScreen}");
+
+            // A tela e a velocidade das partidas (botão direito no ⚔): mostrada a 4× (o botão 4× do replay acende),
+            // minimizada a 16× escolhida no menu, um replay que não é de partida fica como o jogo abriu, e escondida não
+            // mexe na velocidade. A Tela da batalha do jogo segue a escolha.
+            async Task<bool> PvpUntil(string js, int seconds)
+            {
+                var deadline = DateTime.Now.AddSeconds(seconds);
+                while (DateTime.Now < deadline)
+                {
+                    if (await Eval(pvpPane, js) == "true")
+                        return true;
+                    await Task.Delay(100);
+                }
+                return false;
+            }
+            async Task<string> PvpReplay(bool match, bool mini)
+            {
+                await Eval(pvpPane, (match ? "__pvpJogo({ t: 'pvp', partida: { id: 9, venci: false, oponente: { nick: 'Outro' }, delta: -8 } });" : "") +
+                                     $" window.__rp = new window.__RT(null, {{}}, {{ mini: {(mini ? "true" : "false")} }}); __rp.iniciar().then(() => __rp.tocar()); 1");
+                await PvpUntil("window.__rp.tocando === true", 3);
+                return JsonSerializer.Deserialize<string>(await Eval(pvpPane,
+                    "__rp.vel + '/' + (document.querySelector('#gwr-vels .on')?.dataset.vel ?? '-')")) ?? "";
+            }
+            await Eval(pvpPane, "import('/replay-tabuleiro.mjs').then(m => { window.__RT = m.ReplayTabuleiro; });" +
+                                 " document.body.insertAdjacentHTML('beforeend', \"<div id='gwr-vels'><button class='gwr-vel on' data-vel='1'></button>" +
+                                 "<button class='gwr-vel' data-vel='4'></button></div>\"); 1");
+            await SetPvpViewAsync(1, PvpScreens.Full, 4);
+            await SetPvpAsync(1, true);
+            bool viewReady = await PvpUntil("!!window.__RT && __deckPvp.status().velPronta", 5);
+            bool viewFullScreen = await PvpUntil("localStorage.getItem('pvpTelaBatalha') === 'completa'", 3);
+            string viewFull = await PvpReplay(true, false);
+            using (var pvpMenu = new ContextMenuStrip())
+            {
+                FillPvpMenu(1, pvpMenu.Items);
+                pvpMenu.Items.OfType<ToolStripMenuItem>().First(m => m.Text!.StartsWith("Minimizada")).PerformClick();
+            }
+            await PvpUntil("__deckPvp.status().querTela === 'mini'", 3);
+            using (var pvpMenu = new ContextMenuStrip())
+            {
+                FillPvpMenu(1, pvpMenu.Items);
+                pvpMenu.Items.OfType<ToolStripMenuItem>().First(m => m.Text == "16×").PerformClick();
+            }
+            await PvpUntil("__deckPvp.status().querVel === 16", 3);
+            bool viewMiniScreen = await PvpUntil("localStorage.getItem('pvpTelaBatalha') === 'mini'", 3);
+            string viewMini = await PvpReplay(true, true);
+            await Task.Delay(500);
+            string viewOther = await PvpReplay(false, true);
+            await SetPvpViewAsync(1, PvpScreens.Off, 16);
+            bool viewOffScreen = await PvpUntil("localStorage.getItem('pvpTelaBatalha') === 'off'", 3);
+            string viewOff = await PvpReplay(true, true);
+            var viewStatus = await pvpPane.ReadPvpAsync();
+            string viewSaved = $"{_config.PvpScreen[1]}/{_config.PvpSpeed[1]}";
+            // Battery Saver (Modo Economia) ligado: o jogo esconde as partidas assim mesmo. Escondida, o menu avisa; mostrar ou
+            // minimizar desliga ele pelo botão do jogo (#eco-sair), e voltar para Escondida ou desligar a fila religa (#hunt-eco).
+            await Eval(pvpPane, "document.body.insertAdjacentHTML('beforeend', \"<button id='eco-sair'></button><button id='hunt-eco'></button>\");" +
+                                 " document.getElementById('eco-sair').onclick = () => localStorage.setItem('cfg-economia', '0');" +
+                                 " document.getElementById('hunt-eco').onclick = () => localStorage.setItem('cfg-economia', '1');" +
+                                 " localStorage.setItem('cfg-economia', '1'); 1");
+            pvpPane.ShowPvp(await pvpPane.ReadPvpAsync());
+            string viewEco = pvpPane.PvpNoScene ?? "-";
+            bool viewEcoMenu;
+            using (var pvpMenu = new ContextMenuStrip())
+            {
+                FillPvpMenu(1, pvpMenu.Items);
+                viewEcoMenu = pvpMenu.Items.OfType<ToolStripMenuItem>().Any(m => m.Text!.StartsWith("⚠ Battery Saver"));
+            }
+            const string EcoOff = "localStorage.getItem('cfg-economia') === '0' && localStorage.getItem('deckPvpSemEconomia') === '1'";
+            const string EcoOn = "localStorage.getItem('cfg-economia') === '1' && localStorage.getItem('deckPvpSemEconomia') === null";
+            await SetPvpViewAsync(1, PvpScreens.Mini, 0);
+            bool ecoOff = await PvpUntil(EcoOff, 3);
+            var ecoStatus = await pvpPane.ReadPvpAsync();
+            await SetPvpViewAsync(1, PvpScreens.Off, 0);
+            bool ecoBack = await PvpUntil(EcoOn, 3);
+            await SetPvpViewAsync(1, PvpScreens.Full, 0);
+            bool ecoOffAgain = await PvpUntil(EcoOff, 3);
+            await SetPvpAsync(1, false);
+            bool ecoBackOff = await PvpUntil(EcoOn, 3);
+            string ecoSeen = $"{ecoOff}/{ecoStatus?.EcoByDeck}/{ecoBack}/{ecoOffAgain}/{ecoBackOff}";
+            await Eval(pvpPane, "localStorage.removeItem('cfg-economia'); 1");
+            await SetPvpViewAsync(1, PvpScreens.Off, 0);
+            Check("pvp: a tela das partidas (mostrada, minimizada ou escondida) e a velocidade do botão direito no ⚔ valem na próxima partida da fila",
+                viewReady && viewFullScreen && viewFull == "4/4" && viewMiniScreen && viewMini == "16/4" && viewOther == "1/4"
+                && viewOffScreen && viewOff == "1/4" && viewSaved == "off/16" && viewEco == "economia" && viewEcoMenu && ecoSeen == "True/True/True/True/True"
+                && viewStatus is { Screen: "off", WantScreen: "off", WantSpeed: 16, SpeedReady: true, LastSpeed: 16 },
+                $"pronto={viewReady} mostrada={viewFullScreen}/{viewFull} minimizada={viewMiniScreen}/{viewMini} outro replay={viewOther} " +
+                $"escondida={viewOffScreen}/{viewOff} salvo={viewSaved} economia={viewEco}/{viewEcoMenu} battery saver={ecoSeen} status={(viewStatus is null ? "nada" : JsonSerializer.Serialize(viewStatus))}");
+
+            // ⟳ recarregar limpo: o Cache Storage do site some, o login (localStorage) fica, e a página carrega de novo.
+            var cleanPane = _panes[2];
+            await Eval(cleanPane, "localStorage.setItem('sessao-teste', 'fica'); caches.open('deck-teste').then(c => c.put('/x', new Response('a'))); 1");
+            await Task.Delay(500);
+            string cachesBefore = await Eval(cleanPane, "window.__cachesAntes = null; caches.keys().then(k => window.__cachesAntes = k.join(',')); 1");
+            await Task.Delay(300);
+            cachesBefore = await Eval(cleanPane, "window.__cachesAntes");
+            int cleanLoadsBefore = cleanPane.Loads;
+            await cleanPane.ReloadCleanAsync();
+            bool reloadedClean = await WaitFor(() => cleanPane.Loads > cleanLoadsBefore, 10);
+            await Task.Delay(500);
+            await Eval(cleanPane, "window.__cachesDepois = null; caches.keys().then(k => window.__cachesDepois = k.join(',')); 1");
+            await Task.Delay(300);
+            string cachesAfter = await Eval(cleanPane, "window.__cachesDepois");
+            string sessionAfter = await Eval(cleanPane, "localStorage.getItem('sessao-teste')");
+            await Eval(cleanPane, "localStorage.removeItem('sessao-teste'); 1");
+            Check("⟳ recarregar limpo: apaga o Cache Storage do site e recarrega, e o login (localStorage) fica",
+                cachesBefore.Contains("deck-teste") && reloadedClean && cachesAfter == "\"\"" && sessionAfter == "\"fica\"" && cleanPane.CleanReloads == 1,
+                $"antes={cachesBefore} recarregou={reloadedClean} depois={cachesAfter} login={sessionAfter} limpos={cleanPane.CleanReloads}");
 
             SetLayout(DeckLayout.Grid);
             await Task.Delay(500);
@@ -3791,6 +4554,113 @@ internal sealed class DeckForm : Form
             _config.RedeemTwitch = new KickReward?[Accounts];
             _redeemTwitch[0].Restart();
 
+            // O bônus de 1 h pausado no canal: vai o mais barato liberado (o de 3 h, o mesmo preço por hora), e o registro
+            // diz por quê. Todas as durações pausadas: não resgata e avisa uma vez (no registro, e "pausado" no menu). O
+            // saldo que cai sem resgate do deck (pontos gastos em outro lugar com a conta) vai para o registro.
+            string kickBlocked = $"  {_config.AccountNames[0]} · Kick · biscoitao: 400 pontos, mas o bônus está pausado no canal (todas as durações); resgato quando liberar";
+            _config.RedeemKick[0] = KickReward.Xp;
+            _redeemKick[0].Restart();
+            _fakeRedeems.Clear();
+            _fakePausedRewards.Add("xp");
+            _fakePoints["biscoitao"] = 950;
+            _fakePoints["yetz"] = 0;
+            await RedeemKickAsync();
+            var fallbackRedeems = _fakeRedeems.ToList();
+            bool fallbackLogged = _redeemLog.LinesOf(0).Any(l => l.EndsWith(
+                "Kick · biscoitao: resgatou Bônus +15% XP PokeIdle (3h) (900 pontos; sobraram 50; o de 300 pontos está pausado no canal)"));
+            _fakePausedRewards.Add("xp3");
+            _fakePoints["biscoitao"] = 400;
+            await RedeemKickAsync();
+            await RedeemKickAsync();
+            string pausedSummary = LivesSummary(0);
+            int pausedLogs = _redeemLog.LinesOf(0).Count(l => l.EndsWith(kickBlocked));
+            _fakePoints["biscoitao"] = 100;
+            await RedeemKickAsync();
+            bool droppedLogged = _redeemLog.LinesOf(0).Any(l => l.EndsWith(
+                "Kick · biscoitao: o saldo caiu de 400 para 100 sem resgate do deck (300 pontos gastos em outro lugar com esta conta?)"));
+            _fakePausedRewards.Clear();
+            _config.RedeemKick = new KickReward?[Accounts];
+            _redeemKick[0].Restart();
+            Check("pontos da Kick: com o de 1 h pausado vai o de 3 h; tudo pausado avisa uma vez; saldo que cai sem o deck vai ao registro",
+                fallbackRedeems.Count == 1 && fallbackRedeems[0].StartsWith("biscoitao xp3 ") && fallbackLogged && _fakeRedeems.Count == 1
+                && pausedLogs == 1 && pausedSummary.Contains("400/300 pontos") && pausedSummary.Contains("bônus pausado no canal") && droppedLogged,
+                $"pedidos={string.Join(" | ", _fakeRedeems)} registrou={fallbackLogged} avisos={pausedLogs} caiu={droppedLogged} {pausedSummary}");
+
+            // Guarda do bônus: o XP da Kick da conta 1 vence em 10 min e as lives abertas (biscoitao, yetz) estão sem pontos.
+            // O surskity (da lista, fora das lives, offline) tem 1000 e o faturetosl (oficial do jogo) 50: resgata 1 XP no
+            // surskity, numa página escondida, com o login da conta, e o jogo mostra o tempo a mais. Sem canal com os pontos,
+            // diz uma vez no registro.
+            const string GuardSocket = """
+                (() => {
+                  const ws = new WebSocket('wss://deck.test/guarda');
+                  Object.defineProperty(ws, 'readyState', { get: () => 1 });
+                  ws.send = () => {};
+                  window.__guarda = o => ws.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(o) }));
+                  window.__guarda({ t: 'welcome', hunts: [], estado: { cheio: true, nick: 'teste', level: 10, xp: 0, gold: 0 } });
+                  return 1;
+                })()
+                """;
+            string GuardState(int minutes) =>
+                "__guarda({ t: 'estado', estado: { servidorAgora: Date.now(), kick: { vinculado: true, bonus: { xp: Date.now() + " + minutes +
+                " * 60000 }, oficiais: [{ login: 'faturetosl', aoVivo: false, ativo: true }] } } }); 1";
+            string account0 = _config.AccountNames[0];
+            _config.RedeemKick[0] = KickReward.Xp;
+            _redeemKick[0].Restart();
+            _guard.Restart();
+            _fakeRedeems.Clear();
+            _fakePoints["biscoitao"] = 0;
+            _fakePoints["yetz"] = 0;
+            _fakePoints["surskity"] = 1000;
+            _fakePoints["faturetosl"] = 50;
+            await Eval(_panes[0], GuardSocket);
+            await Eval(_panes[0], GuardState(10));
+            await RefreshBonusAsync(0);
+            var guardRedeems = _fakeRedeems.ToList();
+            bool guardLogged = _redeemLog.LinesOf(0).Any(l => l.EndsWith(
+                $"  {account0} · Kick · surskity: guarda do bônus: o de XP vence em 10 min; resgato aqui (1000 pontos, canal offline)"));
+            bool guardRedeemLogged = _redeemLog.LinesOf(0).Any(l => l.EndsWith("Kick · surskity: resgatou Bônus +15% XP PokeIdle (300 pontos; sobraram 700)"));
+            var guardSlot = _guard.SlotOf(0, LiveSite.Kick);
+            bool waiting = guardSlot.RedeemedAt is not null;
+            // O jogo soma 1 h: a guarda vê o tempo a mais e não resgata de novo.
+            await Eval(_panes[0], GuardState(70));
+            guardSlot.HoldUntil = DateTime.MinValue;
+            await RefreshBonusAsync(0);
+            bool confirmed = guardSlot.RedeemedAt is null && _fakeRedeems.Count == 1;
+            string guardTip = Bonus.Parse(await _panes[0].ReadBonusAsync()) is BonusSummary guardSummary ? BonusLine(0, guardSummary) ?? "" : "";
+            // De novo perto de vencer, e ninguém com 300: avisa uma vez.
+            _fakePoints["surskity"] = 100;
+            await Eval(_panes[0], GuardState(5));
+            await RefreshBonusAsync(0);
+            guardSlot.HoldUntil = DateTime.MinValue;
+            await RefreshBonusAsync(0);
+            int noneLogs = _redeemLog.LinesOf(0).Count(l => l.Contains("Kick · guarda do bônus: o de XP vence em ") && l.Contains("nenhum canal fora das lives abertas tem os pontos"));
+            _config.RedeemKick = new KickReward?[Accounts];
+            _redeemKick[0].Restart();
+            _guard.Restart();
+            Check("guarda do bônus: com o bônus vencendo, resgata 1 num canal fora das lives (offline primeiro) e confere que o tempo subiu",
+                guardRedeems.Count == 1 && guardRedeems[0].StartsWith("surskity xp Bearer 123|abc ") && guardLogged && guardRedeemLogged && waiting
+                && confirmed && guardTip.Contains("Kick XP: 1 h ") && guardTip.EndsWith("(guarda do bônus ligada)") && _fakeRedeems.Count == 1 && noneLogs == 1,
+                $"pedidos={string.Join(" | ", guardRedeems)} registrou={guardLogged}/{guardRedeemLogged} esperando={waiting} subiu={confirmed} " +
+                $"dica='{guardTip}' sem pontos={noneLogs}");
+
+            // Na Twitch também: com a Captura de 1 h pausada, vai a de 3 h (1500).
+            twitchCookies.AddOrUpdateCookie(twitchCookies.CreateCookie("auth-token", "tok123", ".twitch.tv", "/"));
+            twitchCookies.AddOrUpdateCookie(twitchCookies.CreateCookie("unique_id", "dev123", ".twitch.tv", "/"));
+            _config.RedeemTwitch[0] = KickReward.Capture;
+            _redeemTwitch[0].Restart();
+            _fakePausedRewards.Add("cap");
+            _fakeTwitchClaims.Remove("tftoddy");
+            _fakeTwitchPoints["tftoddy"] = 1600;
+            _fakeTwitch.Clear();
+            await TwitchPointsAsync();
+            bool twitchFallback = _fakeTwitch.Any(r => r.StartsWith("resgate tftoddy cap3 1500 ")) && _fakeTwitchPoints["tftoddy"] == 100
+                && _redeemLog.LinesOf(0).Any(l => l.EndsWith("Twitch · tftoddy: resgatou Bônus de +15% Capture Boost (3h) (1500 pontos; sobraram 100; o de 500 pontos está pausado no canal)"));
+            _fakePausedRewards.Clear();
+            _config.RedeemTwitch = new KickReward?[Accounts];
+            _redeemTwitch[0].Restart();
+            Check("pontos da Twitch: com o de 1 h pausado vai o de 3 h", twitchFallback,
+                $"pedidos={string.Join(" | ", _fakeTwitch)} saldo={_fakeTwitchPoints["tftoddy"]}");
+
             // Registro dos resgates: cada resgate, baú e pontos que voltaram, com a conta, o site e o canal, no
             // resgates.log; a janela mostra o mais novo em cima.
             var logLines = _redeemLog.Lines.ToList();
@@ -4247,21 +5117,21 @@ internal sealed class DeckForm : Form
                 && new DeckConfig().RedeemKick.All(r => r is null),
                 $"antes→{string.Join(",", redeemConfig.RedeemKick)} por conta→{string.Join(",", perAccount.RedeemKick.Select(r => r?.ToString() ?? "não"))}");
 
-            // A Twitch leve vem ligada de fábrica em todas as contas, também no deck.json de antes (sem o campo); a conta
-            // desligada em Lives → Config… fica salva (a lista curta, editada à mão, completa ligada).
+            // A Twitch e a Kick leves vêm ligadas em todas as contas, também no deck.json de antes (sem o campo) e no que
+            // tinha uma conta desligada (desde 12/11 não desligam mais).
             File.WriteAllText(redeemPath, "{ \"TwitchLives\": 2 }");
             var lightOld = DeckConfig.Load(redeemPath);
             File.WriteAllText(redeemPath, "{ \"TwitchLight\": [ false, true ] }");
             var lightSaved = DeckConfig.Load(redeemPath);
-            Check("Twitch leve: ligada de fábrica em todas as contas (no deck.json de antes também), e a desligada fica salva",
+            Check("Twitch leve: sempre ligada em todas as contas (no deck.json de antes e no que tinha uma desligada também)",
                 lightByDefault && new DeckConfig().TwitchLight.All(l => l) && lightOld.TwitchLight.All(l => l)
-                && lightSaved.TwitchLight.SequenceEqual(new[] { false, true, true, true }),
+                && lightSaved.TwitchLight.SequenceEqual(new[] { true, true, true, true }),
                 $"autoteste={lightByDefault} de antes={string.Join(",", lightOld.TwitchLight)} salva={string.Join(",", lightSaved.TwitchLight)}");
             File.WriteAllText(redeemPath, "{ \"KickLight\": [ true, false ] }");
             var kickLightSaved = DeckConfig.Load(redeemPath);
-            Check("Kick leve: ligada de fábrica em todas as contas (no deck.json de antes também), e a desligada fica salva",
+            Check("Kick leve: sempre ligada em todas as contas (no deck.json de antes e no que tinha uma desligada também)",
                 _kickLightByDefault && new DeckConfig().KickLight.All(l => l) && lightOld.KickLight.All(l => l)
-                && kickLightSaved.KickLight.SequenceEqual(new[] { true, false, true, true }),
+                && kickLightSaved.KickLight.SequenceEqual(new[] { true, true, true, true }),
                 $"autoteste={_kickLightByDefault} de antes={string.Join(",", lightOld.KickLight)} salva={string.Join(",", kickLightSaved.KickLight)}");
             await WaitFor(() => _panes.All(p => p.Status == PaneStatus.Ok), 20);
             _kickLive.Clear();
@@ -4348,10 +5218,11 @@ internal sealed class DeckForm : Form
                 $"status={_panes[0].Status} título='{_panes[0].Core?.DocumentTitle}' lives={(_lives[0] is LivesWindow lw ? $"{lw.Loaded}/{lw.Count}" : "fechadas")}");
             Check("menos animações continua depois de desligar e ligar a conta", await Eval(_panes[0], ReducedMotion) == "true");
 
-            WindowState = FormWindowState.Minimized;
+            // Sem ativar a janela: ativada, ela traria a Área de trabalho 2 para a tela (ou tiraria o foco do jogo).
+            TestDesktop.SetMinimized(this, true);
             await Task.Delay(1500);
             var alive = await Eval(_panes[2], "1 + 1");
-            WindowState = FormWindowState.Normal;
+            TestDesktop.SetMinimized(this, false);
             await Task.Delay(1000);
             Check("minimizar e restaurar com as contas vivas", alive == "2" && Shape(2, 2), Detail());
 
@@ -4461,6 +5332,7 @@ internal sealed class DeckForm : Form
         }
         finally
         {
+            log.Add($"INFO {TestDesktop.Summary}" + (TestDesktop.Active ? $" (deck {(TestDesktop.IsOnTarget(Handle) ? "nela" : "FORA dela")})" : ""));
             File.WriteAllText(SelfTestReport, string.Join(Environment.NewLine, log));
             Close();
         }

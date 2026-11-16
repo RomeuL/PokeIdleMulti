@@ -12,7 +12,7 @@
   const MAX_QTY = 9999; // o teto do jogo por pedido (`maxCompraPorOuro`)
   const TIMEOUT = 15000; // compra sem resposta do jogo depois disso conta como falha
   const GOLDEN_POTION = 70070; // a única que cura por % do HP: fica de fora (nem conta, nem compra)
-  const KEYS = ['gold', 'balls', 'items', 'automation', 'activeId', 'nick'];
+  const KEYS = ['gold', 'balls', 'items', 'automation', 'activeId', 'nick', 'loja'];
   const WANTED = new Set(['welcome', 'estado', 'batalha', 'erro']);
 
   let socket = null;
@@ -30,7 +30,7 @@
   let nextAt = 0;
   let pauseUntil = 0;
   let failures = 0;
-  let queueAt = 0;
+  let lastAuto = { sig: '', at: 0 }; // o último pedido às Automações do jogo
   const filling = { balls: false, revives: false, potions: false };
 
   const fmt = (n) => Math.round(n).toLocaleString('pt-BR');
@@ -188,6 +188,11 @@
       loadMirror();
       return;
     }
+    // As Automações do jogo antes da compra (também com uma compra no ar): o que a recompra compra, o jogo usa.
+    const potions = shop('heal');
+    const revives = shop('revive');
+    const potion = pickPotion(potions);
+    fixAutomation(potion, potions, revives, now);
     if (pending) {
       // Sem o aviso da compra, o estoque que subiu também confirma.
       const count = pending.kind === 'balls' ? Number(account.balls?.[pending.item.id]) || 0 : have(pending.item);
@@ -197,11 +202,7 @@
     }
     if (now < nextAt || now < pauseUntil) return;
 
-    const potions = shop('heal');
-    const revives = shop('revive');
-    const potion = pickPotion(potions);
-    fixQueue(potion, potions, now);
-    const b = ballCatalog.find((x) => x.id === config.balls?.id && x.compravel && x.priceGold > 0);
+    const b =ballCatalog.find((x) => x.id === config.balls?.id && x.compravel && x.priceGold > 0);
     const ball = b && { id: b.id, name: b.nome, price: paid.get(`bola${b.id}`) ?? b.priceGold };
     // Primeiro o que mantém o pokemon de pé, se o ouro não der para tudo.
     const todo = plan('potions', config.potions, total(potions), potion)
@@ -213,18 +214,64 @@
     socket.send(JSON.stringify({ t: 'shop.buy', kind: todo.kind === 'balls' ? 'ball' : 'item', id: todo.item.id, qty: todo.qty }));
   }
 
-  /** A poção escolhida em 1º na fila do "Usar Poções" (a ordem da fila é a ordem de gasto). */
-  function fixQueue(potion, potions, now) {
+  /**
+   * As Automações do jogo para o que a recompra compra (um só `auto.set`, o mesmo do painel do jogo):
+   * - poções: "Usar Poções" ligado e a poção escolhida em 1º na fila (a ordem da fila é a ordem de gasto);
+   * - revives: "Usar Revive" ligado, com o revive que ela compra entre os escolhidos (lista vazia é "qualquer um");
+   * - pokebola, só com VIP (o jogo reserva o lançar automático para VIP): "Lançar sem parar" sempre marcado (no lugar do
+   *   "até capturar") e a bola que ela compra em 1º.
+   * Desmarcar no jogo com a recompra ligada: ela marca de novo. O mesmo pedido não sai de novo antes de 30 s (o jogo
+   * devolve o estado novo antes disso).
+   */
+  function fixAutomation(potion, potions, revives, now) {
     const auto = account.automation;
-    if (!config.potions?.on || !config.potionFirst || !potion || !auto || typeof auto !== 'object' || now < queueAt) return;
-    const queue = Array.isArray(auto.potionIds) ? auto.potionIds : [];
-    if (queue[0] === potion.id) return;
-    queueAt = now + 30000;
-    // Fila vazia é "qualquer uma, da mais cara para a mais barata": as outras continuam valendo, nessa ordem.
-    const rest = queue.length ? queue.filter((id) => id !== potion.id)
-      : potions.filter((p) => p.id !== potion.id).sort((a, b) => b.price - a.price).map((p) => p.id);
-    socket.send(JSON.stringify({ t: 'auto.set', ...auto, potionIds: [potion.id, ...rest] }));
-    note(`${potion.name} em 1º na fila do "Usar Poções"`);
+    if (!auto || typeof auto !== 'object') return;
+    const patch = {};
+    const turned = [];
+    if (config.potions?.on) {
+      if (!auto.autoPotion) {
+        patch.autoPotion = true;
+        turned.push('Usar Poções');
+      }
+      const queue = Array.isArray(auto.potionIds) ? auto.potionIds : [];
+      if (config.potionFirst && potion && queue[0] !== potion.id) {
+        // Fila vazia é "qualquer uma, da mais cara para a mais barata": as outras continuam valendo, nessa ordem.
+        const rest = queue.length ? queue.filter((id) => id !== potion.id)
+          : potions.filter((p) => p.id !== potion.id).sort((a, b) => b.price - a.price).map((p) => p.id);
+        patch.potionIds = [potion.id, ...rest];
+        turned.push(`${potion.name} em 1º na fila do "Usar Poções"`);
+      }
+    }
+    if (config.revives?.on) {
+      if (!auto.autoRevive) {
+        patch.autoRevive = true;
+        turned.push('Usar Revive');
+      }
+      const chosen = Array.isArray(auto.reviveIds) ? auto.reviveIds : [];
+      if (revives[0] && chosen.length && !chosen.includes(revives[0].id)) {
+        patch.reviveIds = [...chosen, revives[0].id];
+        turned.push(`${revives[0].name} no "Usar Revive"`);
+      }
+    }
+    const ballId = config.balls?.id;
+    if (config.balls?.on && ballId > 0 && account.loja?.vip) {
+      if (!auto.autoBallSemParar || auto.autoBallAteCapturar) {
+        patch.autoBallSemParar = true;
+        patch.autoBallAteCapturar = false;
+        turned.push('Lançar sem parar');
+      }
+      const balls = Array.isArray(auto.ballIds) ? auto.ballIds : [];
+      if (balls[0] !== ballId) {
+        patch.ballIds = [ballId, ...balls.filter((id) => id !== ballId)];
+        turned.push(`${ballCatalog.find((x) => x.id === ballId)?.nome ?? `bola ${ballId}`} em 1º`);
+      }
+    }
+    if (!turned.length) return;
+    const sig = JSON.stringify(patch);
+    if (sig === lastAuto.sig && now < lastAuto.at + 30000) return;
+    lastAuto = { sig, at: now };
+    socket.send(JSON.stringify({ t: 'auto.set', ...auto, ...patch }));
+    note(`Automações do jogo: ${turned.join(', ')}`);
   }
 
   function bought(e) {

@@ -9,6 +9,9 @@ internal static class Program
     {
         ApplicationConfiguration.Initialize();
         ToolStripManager.Renderer = Theme.Renderer;
+        // O que derruba o deck, ou a tarefa que falhou sem ninguém ver, vai para o diagnostico\deck.log.
+        AppDomain.CurrentDomain.UnhandledException += (_, e) => Diag.Write("ERRO que fechou o deck: " + e.ExceptionObject);
+        TaskScheduler.UnobservedTaskException += (_, e) => Diag.Write("erro numa tarefa: " + e.Exception.GetBaseException());
 
         try
         {
@@ -16,6 +19,7 @@ internal static class Program
         }
         catch (WebView2RuntimeNotFoundException)
         {
+            Diag.Write("sem o WebView2 Runtime instalado");
             DeckBox.Show(null,
                 "Falta o WebView2 Runtime da Microsoft (o motor de navegador que o deck usa).\n\n" +
                 "Baixe em https://go.microsoft.com/fwlink/p/?LinkId=2124703 e abra o deck de novo.",
@@ -28,7 +32,13 @@ internal static class Program
         {
             using var measuring = new Mutex(true, "PokeIdleDeck-consumo", out bool alone);
             if (alone)
-                Application.Run(new ConsumptionTest());
+            {
+                // A janela do teste na Área de trabalho 2; as lives ficam como no deck (fora da tela), para a medição valer.
+                TestDesktop.Start(hideStrays: false);
+                var test = new ConsumptionTest();
+                TestDesktop.HideUntilMoved(test);
+                Application.Run(test);
+            }
             return;
         }
 
@@ -41,6 +51,11 @@ internal static class Program
             return;
         }
 
-        Application.Run(new DeckForm(selfTest));
+        // O autoteste abre na Área de trabalho 2 do Windows (sem ela, no 2º monitor), longe de quem está jogando.
+        if (selfTest)
+            TestDesktop.Start();
+        var deck = new DeckForm(selfTest);
+        TestDesktop.HideUntilMoved(deck);
+        Application.Run(deck);
     }
 }

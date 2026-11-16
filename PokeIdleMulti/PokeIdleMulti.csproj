@@ -16,10 +16,13 @@
     <ApplicationIcon>deck.ico</ApplicationIcon>
   </PropertyGroup>
 
+
   <ItemGroup>
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" />
     <EmbeddedResource Include="deck.ico" LogicalName="deck.ico" />
     <EmbeddedResource Include="recompra.js" LogicalName="recompra.js" />
+    <EmbeddedResource Include="pvp.js" LogicalName="pvp.js" />
+    <EmbeddedResource Include="bonus.js" LogicalName="bonus.js" />
   </ItemGroup>
 
 </Project>

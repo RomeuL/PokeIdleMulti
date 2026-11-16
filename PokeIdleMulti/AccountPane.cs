@@ -28,6 +28,8 @@ internal sealed class AccountPane : UserControl
     private readonly ToolStripDropDownButton _lives = new("lives") { Enabled = false };
     private readonly ToolStripButton _power = new(Theme.PowerGlyph) { Font = Theme.Symbols };
     private readonly ToolStripButton _restock = new(Theme.CartGlyph) { Font = Theme.Symbols };
+    // As espadas da fila de PvP: os ícones do Windows não têm, a fonte de símbolos tem.
+    private readonly ToolStripButton _pvp = new("⚔") { Font = new Font("Segoe UI Symbol", 11f) };
     private readonly Label _offNote = new()
     {
         Dock = DockStyle.Fill,
@@ -73,13 +75,21 @@ internal sealed class AccountPane : UserControl
 
         // Itens à direita entram da direita para a esquerda.
         _power.Alignment = _focus.Alignment = _reload.Alignment = _mute.Alignment = _lives.Alignment =
-            _vote.Alignment = _restock.Alignment = ToolStripItemAlignment.Right;
+            _vote.Alignment = _restock.Alignment = _pvp.Alignment = ToolStripItemAlignment.Right;
         _restock.Click += (_, _) => RestockRequested?.Invoke(this);
         ShowRestock(null);
+        _pvp.Click += (_, _) => PvpRequested?.Invoke(this);
+        // Botão direito: a tela e a velocidade das partidas (o clique de botão direito num ToolStripButton não dispara o Click).
+        _pvp.MouseUp += (_, e) =>
+        {
+            if (e.Button == MouseButtons.Right)
+                PvpMenuRequested?.Invoke(this);
+        };
+        ShowPvp(null);
         _power.ToolTipText = "Desligar esta conta: o jogo, as extensões, as lives e o voto dela param (ela continua aqui no deck)";
         _power.Click += (_, _) => PowerRequested?.Invoke(this);
         _focus.ToolTipText = "Ampliar esta conta / voltar (duplo clique no cabeçalho faz o mesmo)";
-        _reload.ToolTipText = "Recarregar a página";
+        _reload.ToolTipText = "Recarregar limpo: apaga o cache do jogo (e os service workers do site) e recarrega. O login e as extensões ficam";
         _mute.ToolTipText = "Ligar / desligar o som desta conta";
         _voteBold = new Font(_header.Font, FontStyle.Bold);
         _focus.Click += (_, _) => FocusRequested?.Invoke(this);
@@ -90,8 +100,8 @@ internal sealed class AccountPane : UserControl
         _lives.DropDownItems.Add("…");
         _header.DoubleClick += (_, _) => FocusRequested?.Invoke(this);
         _header.SizeChanged += (_, _) => FitHeader();
-        _header.Items.AddRange(new ToolStripItem[] { _dot, _name, _info, _power, _focus, _reload, _mute, _lives, _restock, _vote });
-        foreach (var item in new ToolStripItem[] { _power, _focus, _reload, _mute, _lives, _restock, _vote })
+        _header.Items.AddRange(new ToolStripItem[] { _dot, _name, _info, _power, _focus, _reload, _mute, _lives, _restock, _pvp, _vote });
+        foreach (var item in new ToolStripItem[] { _power, _focus, _reload, _mute, _lives, _restock, _pvp, _vote })
             Roomy(item);
 
         _offNote.Font = new Font(Font.FontFamily, 11f);
@@ -124,6 +134,12 @@ internal sealed class AccountPane : UserControl
     /// <summary>O carrinho do cabeçalho: abrir a recompra desta conta.</summary>
     public event Action<AccountPane>? RestockRequested;
 
+    /// <summary>O ⚔ do cabeçalho: ligar ou desligar a fila de PvP da conta.</summary>
+    public event Action<AccountPane>? PvpRequested;
+
+    /// <summary>Botão direito no ⚔: o menu da tela e da velocidade das partidas.</summary>
+    public event Action<AccountPane>? PvpMenuRequested;
+
     /// <summary>O menu do botão lives abrindo: o deck põe nele as lives da Kick e da Twitch para fechar ou abrir de novo.</summary>
     public event Action<AccountPane, ToolStripItemCollection>? LivesMenuOpening;
 
@@ -145,6 +161,9 @@ internal sealed class AccountPane : UserControl
     public int ExtensionButtonCount => _extensionItems.Count;
     public string? VoteText => _vote.Visible ? _voteText : null;
 
+    /// <summary>O diagnóstico da carga desta conta (diagnostico\contaN.log; o deck cria, null: sem log).</summary>
+    public PaneDiag? Diag { get; set; }
+
     /// <summary>Cria o navegador da conta e abre o jogo; <paramref name="prepare"/> roda antes de abrir (o conserto das extensões).</summary>
     public async Task InitializeAsync(CoreWebView2Environment env, string url, double zoom, bool muted, Action<CoreWebView2>? setup,
         Func<CoreWebView2, Task>? prepare = null)
@@ -155,6 +174,12 @@ internal sealed class AccountPane : UserControl
         await WebView.EnsureCoreWebView2Async(env, options);
 
         var core = WebView.CoreWebView2;
+        if (Diag is not null)
+        {
+            // Antes dos outros scripts do deck, para pegar os erros deles também.
+            await Diag.AttachAsync(core);
+            await core.AddScriptToExecuteOnDocumentCreatedAsync(PaneDiag.PageScript);
+        }
         core.Settings.IsStatusBarEnabled = false;
         core.IsMuted = muted;
         UpdateMuteButton();
@@ -163,16 +188,21 @@ internal sealed class AccountPane : UserControl
 
         core.NavigationStarting += (_, e) =>
         {
-            if (e.IsRedirected || Off)
+            Diag?.Navigation(e.Uri, e.IsRedirected);
+            if (e.IsRedirected || Off || _wiping)
                 return;
+            _openSince = _failedSince = null;
             SetStatus(PaneStatus.Loading, "carregando…");
         };
         core.NavigationCompleted += (_, e) =>
         {
-            if (Off)
+            Diag?.Completed(e.IsSuccess, e.WebErrorStatus, e.HttpStatusCode);
+            if (Off || _wiping)
                 return;
             if (e.IsSuccess)
             {
+                Loads++;
+                _openSince = DateTime.Now;
                 StartedAt ??= DateTime.Now;
                 SetStatus(PaneStatus.Ok, null);
                 // O ULTRA do deck vale para todas: a conta que recarrega volta a ele, mesmo se tinha saído no
@@ -184,10 +214,15 @@ internal sealed class AccountPane : UserControl
             }
             else if (e.WebErrorStatus != CoreWebView2WebErrorStatus.OperationCanceled)
             {
-                SetStatus(PaneStatus.Failed, "não carregou: sem internet ou o site caiu");
+                _failedSince = DateTime.Now;
+                SetStatus(PaneStatus.Failed, "não carregou: sem internet ou o site caiu (tento de novo sozinho)");
             }
         };
-        core.ProcessFailed += (_, e) => OnProcessFailed(e);
+        core.ProcessFailed += (_, e) =>
+        {
+            Diag?.ProcessFailed(e);
+            OnProcessFailed(e);
+        };
         core.NewWindowRequested += (_, e) =>
         {
             if (TopIdleLinkRequested is not null && TopIdle.IsTopIdleLink(e.Uri))
@@ -210,7 +245,9 @@ internal sealed class AccountPane : UserControl
             {
                 return;
             }
-            if (message == "F11")
+            if (message is not null && message.StartsWith(PaneDiag.MessagePrefix))
+                Diag?.Page(message);
+            else if (message == "F11")
                 FullscreenRequested?.Invoke(this);
             else if (message is not null && Echo.Parse(message) is Echo.Click click)
                 Clicked?.Invoke(this, click);
@@ -218,6 +255,8 @@ internal sealed class AccountPane : UserControl
         await core.AddScriptToExecuteOnDocumentCreatedAsync(KeyScript);
         await core.AddScriptToExecuteOnDocumentCreatedAsync(Echo.CaptureScript);
         await core.AddScriptToExecuteOnDocumentCreatedAsync(Restock.Script);
+        await core.AddScriptToExecuteOnDocumentCreatedAsync(Pvp.Script);
+        await core.AddScriptToExecuteOnDocumentCreatedAsync(Bonus.Script);
         await core.AddScriptToExecuteOnDocumentCreatedAsync(FrameLimitScript);
         await core.AddScriptToExecuteOnDocumentCreatedAsync(SpriteLimitScript);
         _fpsScript = null;
@@ -227,13 +266,264 @@ internal sealed class AccountPane : UserControl
         setup?.Invoke(core);
         if (prepare is not null)
             await prepare(core);
+        _url = url;
         core.Navigate(url);
     }
 
     public void Reload()
     {
+        Diag?.Write("recarregar");
         StartedAt = null;
         Core?.Reload();
+    }
+
+    /// <summary>Quantas vezes a conta recarregou limpo, para o autoteste.</summary>
+    public int CleanReloads { get; private set; }
+
+    /// <summary>
+    /// Recarrega limpo (o ⟳ e o menu da conta; o vigia do jogo que não abre, da 2ª tentativa em diante): apaga o cache de
+    /// disco do perfil e, só do site do jogo, o Cache Storage e os service workers, e recarrega sem o cache. O login (que o
+    /// jogo guarda no localStorage), os cookies da Twitch e da Kick e as extensões ficam.
+    /// </summary>
+    public async Task ReloadCleanAsync()
+    {
+        StartedAt = null;
+        if (Core is not CoreWebView2 core)
+            return;
+        Diag?.Write("recarregar limpo (sem o cache, o Cache Storage e os service workers do jogo)");
+        string origin = GameOrigin(core);
+        try
+        {
+            await core.CallDevToolsProtocolMethodAsync("Network.clearBrowserCache", "{}");
+            await core.CallDevToolsProtocolMethodAsync("Storage.clearDataForOrigin",
+                JsonSerializer.Serialize(new { origin, storageTypes = "cache_storage,service_workers,shader_cache" }));
+        }
+        catch (Exception ex)
+        {
+            // Sem limpar, recarrega assim mesmo.
+            Diag?.Write("não consegui limpar o cache: " + ex.Message);
+        }
+        CleanReloads++;
+        // A página que nem carregou (sem internet, site fora do ar) volta para o endereço do jogo.
+        if (_status == PaneStatus.Failed && _url is not null)
+        {
+            core.Navigate(_url);
+            return;
+        }
+        try
+        {
+            await core.CallDevToolsProtocolMethodAsync("Page.reload", "{\"ignoreCache\":true}");
+        }
+        catch
+        {
+            core.Reload();
+        }
+    }
+
+    /// <summary>O site do jogo aberto na conta (https://pokeidle.io; no autoteste, https://deck.test).</summary>
+    private string GameOrigin(CoreWebView2 core) =>
+        Uri.TryCreate(core.Source, UriKind.Absolute, out var uri) && uri.Host is "pokeidle.io" or "deck.test"
+            ? uri.GetLeftPart(UriPartial.Authority)
+            : _url is not null && Uri.TryCreate(_url, UriKind.Absolute, out var game) ? game.GetLeftPart(UriPartial.Authority) : "https://pokeidle.io";
+
+    /// <summary>Quantas vezes os dados da conta foram apagados, para o autoteste.</summary>
+    public int Wipes { get; private set; }
+
+    private bool _wiping; // saindo do jogo para apagar: a página em branco não conta como carregada
+
+    /// <summary>
+    /// Apaga os dados da conta e abre o jogo do zero, na tela de login (o "Recarregar limpo" deixa o login e o id do
+    /// aparelho, que o jogo guarda no localStorage, e os cookies). Do site do jogo, tudo: localStorage, IndexedDB, cookies
+    /// (os do Cloudflare também), Cache Storage e service workers; e o cache de disco do perfil. Com
+    /// <paramref name="everything"/>, os cookies de todos os sites também (sai da Twitch e da Kick). As extensões e as
+    /// configurações delas ficam. Sai do jogo antes (página em branco), para ele não gravar a sessão de volta ao fechar.
+    /// </summary>
+    public async Task<bool> WipeAsync(bool everything)
+    {
+        if (Core is not CoreWebView2 core || _url is null)
+            return false;
+        string origin = GameOrigin(core);
+        Diag?.Write(everything ? "apagar os dados da conta: tudo (o jogo e os cookies da Twitch e da Kick)" : "apagar os dados da conta: o jogo");
+        StartedAt = null;
+        StuckReloads = 0;
+        _openSince = _failedSince = null;
+        _wiping = true;
+        bool ok;
+        try
+        {
+            SetStatus(PaneStatus.Loading, "apagando os dados da conta…");
+            var blank = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            void Left(object? sender, CoreWebView2NavigationCompletedEventArgs e) => blank.TrySetResult();
+            core.NavigationCompleted += Left;
+            core.Navigate("about:blank");
+            await Task.WhenAny(blank.Task, Task.Delay(TimeSpan.FromSeconds(10)));
+            core.NavigationCompleted -= Left;
+
+            await core.CallDevToolsProtocolMethodAsync("Network.clearBrowserCache", "{}");
+            await core.CallDevToolsProtocolMethodAsync("Storage.clearDataForOrigin",
+                JsonSerializer.Serialize(new { origin, storageTypes = "all" }));
+            if (everything)
+            {
+                await core.CallDevToolsProtocolMethodAsync("Network.clearBrowserCookies", "{}");
+            }
+            else
+            {
+                // Os cookies do domínio (.pokeidle.io, os do Cloudflare) nem sempre saem pela origem.
+                foreach (var cookie in await core.CookieManager.GetCookiesAsync(origin))
+                    core.CookieManager.DeleteCookie(cookie);
+            }
+            ok = true;
+        }
+        catch (Exception ex)
+        {
+            ok = false;
+            Diag?.Write("não consegui apagar tudo: " + ex.Message);
+        }
+        finally
+        {
+            _wiping = false;
+        }
+        Wipes++;
+        SetStatus(PaneStatus.Loading, null);
+        core.Navigate(_url);
+        return ok;
+    }
+
+    // ---------- O jogo que não abre ----------
+
+    /// <summary>
+    /// Quanto esperar o jogo abrir depois que a página carregou (null: não vigia; o autoteste). Já aconteceu, ao abrir o
+    /// deck, as 4 contas ficarem na tela de abertura do jogo (o portal com a barra de carga) sem conectar nem mostrar o
+    /// login; recarregar resolve. Cada nova tentativa espera mais (2×, 3×… até 5× isto), para não martelar o site fora do ar.
+    /// </summary>
+    public TimeSpan? LoadTimeout { get; set; } = TimeSpan.FromSeconds(60);
+
+    /// <summary>Quantas vezes seguidas o deck recarregou a conta porque o jogo não abriu (volta a 0 quando abre).</summary>
+    public int StuckReloads { get; private set; }
+
+    /// <summary>Quantas vezes a página terminou de carregar, para o autoteste.</summary>
+    public int Loads { get; private set; }
+
+    /// <summary>A conta recarregou sozinha porque o jogo não abriu; o texto diz onde ele parou.</summary>
+    public event Action<AccountPane, string>? GameStuck;
+
+    private DateTime? _openSince; // a página carregou e o jogo ainda não abriu
+    private DateTime? _failedSince; // a página não carregou (sem internet, site fora do ar)
+    private bool _checkingOpen;
+    private string? _url;
+
+    /// <summary>
+    /// Onde o jogo está: "jogo" (o socket conectou), um aviso do jogo por cima da tela ("aberta em outro lugar", quando
+    /// outro aparelho pegou a sessão; "aviso do jogo: …", o aviso da conta: limite de contas no mesmo IP, sessão inválida,
+    /// banimento), a tela que espera a pessoa (login, confirmar o e-mail, escolher o nick, o jogo aberto), "cloudflare" (o
+    /// desafio de lá), ou "carga N% etapa" (ainda na tela de abertura). Os avisos vêm antes da carga: eles aparecem por
+    /// cima dela, e recarregar ali tomaria a sessão do outro aparelho (ou não adiantaria).
+    /// </summary>
+    private const string OpenScript =
+        "(() => {" +
+        " try { const f = window.__deckBonus && window.__deckBonus.summary(); if (f && f.connected) return 'jogo'; } catch { }" +
+        " const shown = (id) => { const e = document.getElementById(id); return !!e && !e.classList.contains('hidden'); };" +
+        " if (shown('sessao-tomada')) return 'aberta em outro lugar';" +
+        " if (shown('alerta-conta')) { const t = document.getElementById('alerta-conta-titulo');" +
+        "  return ('aviso do jogo: ' + (t ? t.textContent : '')).trim(); }" +
+        " if (/just a moment|um momento/i.test(document.title)) return 'cloudflare';" +
+        " for (const id of ['login', 'confirmar-email', 'escolher-nick', 'app']) {" +
+        "  const e = document.getElementById(id);" +
+        "  if (e && !e.classList.contains('hidden') && e.offsetParent !== null) return id; }" +
+        " const p = document.getElementById('carga-pct'), t = document.getElementById('carga-etapa');" +
+        " return ('carga ' + (p ? p.textContent : '?') + '% ' + (t ? t.textContent : '')).trim(); })()";
+
+    /// <summary>
+    /// Confere se o jogo abriu; preso na abertura além do tempo (ou com a página que não carregou), recarrega. O deck chama
+    /// a cada 5 s; depois que o jogo abre, só volta a vigiar na próxima vez que a página carregar.
+    /// </summary>
+    public async Task CheckGameOpenAsync()
+    {
+        // Só no site do jogo: numa página de fora (um login do Google aberto na conta, por exemplo) não mexe.
+        if (LoadTimeout is not TimeSpan timeout || Core is null || Off || _checkingOpen || !OnGame)
+            return;
+        var wait = timeout * Math.Min(StuckReloads + 1, 5);
+        if (_status == PaneStatus.Failed && _failedSince is DateTime failed && _url is not null)
+        {
+            // A página nem carregou: tenta de novo (pela metade do tempo; o site pode ter voltado).
+            if (DateTime.Now - failed < wait / 2)
+                return;
+            _failedSince = null;
+            if (Diag is not null)
+            {
+                // O print mostra a página de erro do navegador (com o código do erro).
+                _checkingOpen = true;
+                try
+                {
+                    await Diag.SnapshotAsync(Core, "a página não carregou");
+                }
+                finally
+                {
+                    _checkingOpen = false;
+                }
+                if (Core is null || Off || _status != PaneStatus.Failed)
+                    return; // desligou, ou já está carregando de novo
+            }
+            Stuck($"a página não carregou em {(wait / 2).TotalSeconds:0} s", () => Core.Navigate(_url));
+            return;
+        }
+        if (_status != PaneStatus.Ok || _openSince is not DateTime since)
+            return;
+        _checkingOpen = true;
+        try
+        {
+            string state;
+            try
+            {
+                state = JsonSerializer.Deserialize<string>(await WebView.ExecuteScriptAsync(OpenScript)) ?? "";
+            }
+            catch
+            {
+                return;
+            }
+            if (_openSince != since)
+                return; // carregou de novo enquanto conferia
+            Diag?.State(state);
+            if (!state.StartsWith("carga"))
+            {
+                _openSince = null;
+                StuckReloads = 0;
+                // Aberta em outro lugar, ou um aviso da conta: o deck não recarrega (tomaria a sessão de volta, ou não
+                // adiantaria); fica o aviso no cabeçalho.
+                if (state == "aberta em outro lugar" || state.StartsWith("aviso do jogo"))
+                    Note($"{state}: o deck não recarrega");
+                return;
+            }
+            // Da 2ª tentativa em diante, recarrega limpo (o cache e os service workers do site podem ser o que prende).
+            if (DateTime.Now - since >= wait)
+            {
+                // O retrato e o print antes de recarregar: onde a tela de abertura parou.
+                if (Diag is not null && Core is CoreWebView2 stuck)
+                {
+                    await Diag.SnapshotAsync(stuck, "o vigia vai recarregar");
+                    if (_openSince != since || Off)
+                        return;
+                }
+                Stuck($"o jogo não abriu em {wait.TotalSeconds:0} s ({state})" + (StuckReloads >= 1 ? ", limpando o cache" : ""),
+                    StuckReloads >= 1 ? () => _ = ReloadCleanAsync() : Reload);
+            }
+        }
+        finally
+        {
+            _checkingOpen = false;
+        }
+    }
+
+    private void Stuck(string why, Action retry)
+    {
+        // Até a página nova carregar, não confere de novo (senão recarregaria duas vezes).
+        _openSince = _failedSince = null;
+        StuckReloads++;
+        string text = $"{why}: recarregando ({StuckReloads}ª vez)";
+        Diag?.Write("vigia: " + text);
+        GameStuck?.Invoke(this, text);
+        Note(text);
+        retry();
     }
 
     /// <summary>
@@ -448,6 +738,8 @@ internal sealed class AccountPane : UserControl
     public void ShowRestock(RestockStatus? status)
     {
         bool on = RestockConfig.On;
+        if (_fitted.Restock != on)
+            FitHeader();
         bool working = on && status is { Connected: true, Paused: false };
         _restock.ForeColor = !on ? Theme.Muted : working ? Theme.Ok : Theme.Warn;
         RestockState = !on ? "desligada" : working ? "ligada" : "esperando";
@@ -467,6 +759,169 @@ internal sealed class AccountPane : UserControl
         if (status?.Log is { Count: > 0 } log)
             lines.Add(log[^1]);
         _restock.ToolTipText = string.Join("\n", lines);
+    }
+
+    /// <summary>
+    /// Roda um script na página do jogo da conta e devolve o resultado (o JSON do ExecuteScript); null com a conta
+    /// desligada, fora do jogo ou sem resposta.
+    /// </summary>
+    public async Task<string?> RunGameScriptAsync(string script)
+    {
+        if (Off || !OnGame)
+            return null;
+        try
+        {
+            return await WebView.ExecuteScriptAsync(script);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>A fila de PvP desta conta ligada (deck.json <c>Pvp</c>).</summary>
+    public bool PvpOn { get; set; }
+
+    /// <summary>Como as partidas da fila aparecem (deck.json <c>PvpScreen</c>: completa, mini ou off).</summary>
+    public string PvpScreen { get; set; } = PvpScreens.Off;
+
+    /// <summary>A velocidade das partidas mostradas (deck.json <c>PvpSpeed</c>; 0 = a do jogo).</summary>
+    public double PvpSpeed { get; set; }
+
+    /// <summary>"economia" ou "ultra" quando o jogo esconde as partidas de qualquer jeito (a última leitura da página).</summary>
+    public string? PvpNoScene { get; private set; }
+
+    /// <summary>Onde abrir o menu do botão direito no ⚔: logo abaixo dele, sem cobrir o cabeçalho (o menu cresce para a esquerda).</summary>
+    public Point PvpMenuPoint => _header.PointToScreen(new Point(_pvp.Bounds.Right, _header.Height + 2));
+
+    /// <summary>Liga ou desliga a fila de PvP na página, com a tela e a velocidade (o script dela já está lá desde o carregamento).</summary>
+    public async Task PushPvpAsync()
+    {
+        if (Off || !OnGame)
+            return;
+        try
+        {
+            await WebView.ExecuteScriptAsync(Pvp.SetScript(PvpOn, PvpScreen, PvpSpeed));
+        }
+        catch
+        {
+            // A página está fechando: a próxima recebe na primeira leitura.
+        }
+    }
+
+    /// <summary>A fila de PvP da página; página que recarregou (e voltou desligada) recebe o liga de novo.</summary>
+    public async Task<PvpStatus?> ReadPvpAsync()
+    {
+        if (Off || !OnGame)
+            return null;
+        PvpStatus? status;
+        string raw;
+        try
+        {
+            raw = await WebView.ExecuteScriptAsync(Pvp.StatusScript);
+            status = Pvp.Parse(raw);
+        }
+        catch
+        {
+            return null;
+        }
+        // O script não está na página (ela carregou sem ele): põe agora; ele acha o socket do jogo pelo do Rotom.
+        if (raw == "null" && PvpOn)
+        {
+            try
+            {
+                await WebView.ExecuteScriptAsync(Pvp.Script);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+        if (status is null || status.On != PvpOn || status.WantScreen != PvpScreens.Normalized(PvpScreen)
+            || status.WantSpeed != PvpScreens.NormalizedSpeed(PvpSpeed))
+            await PushPvpAsync();
+        return status;
+    }
+
+    /// <summary>
+    /// O ⚔ do cabeçalho: verde com a fila ligada e a conta na fila (ou numa partida), amarelo ligada esperando (o jogo, a
+    /// pausa entre partidas, uma recusa), apagado desligada. A dica tem há quanto tempo está na fila, as partidas desde
+    /// que ligou e a última linha do registro.
+    /// </summary>
+    public void ShowPvp(PvpStatus? status)
+    {
+        bool on = PvpOn;
+        if (_fitted.Pvp != on)
+            FitHeader();
+        bool connected = status is { Connected: true, On: true };
+        PvpWaiting = connected || !on ? null : Pvp.Waiting(status);
+        // VIP: a auto-fila do jogo ligada já é a fila funcionando (o jogo põe a conta na fila depois de cada partida).
+        bool working = on && connected && (status!.Na || status.Vip && status.Auto);
+        _pvp.ForeColor = !on ? Theme.Muted : working ? Theme.Ok : Theme.Warn;
+        PvpState = !on ? "desligada" : working ? "na fila" : "esperando";
+        var lines = new List<string>
+        {
+            !on ? "Fila de PvP desligada: clique para ligar (a conta entra na fila do PvP ranqueado e volta depois de cada partida)"
+            : !connected ? "Fila de PvP ligada: " + PvpWaiting
+            : status!.Vip && status.Auto ? "Auto-fila do jogo ligada (VIP): o jogo põe a conta na fila depois de cada partida" +
+                                           (status.Na ? $"; na fila há {Pvp.Duration(status.NaSegundos)}" : "")
+            : status.Na ? $"Na fila de PvP há {Pvp.Duration(status.NaSegundos)}" + (status.Tamanho > 1 ? $" ({status.Tamanho} na fila)" : "")
+            : status.EsperaSegundos > 0 ? $"Fila de PvP ligada: entra de novo em {Pvp.Duration(status.EsperaSegundos)}"
+            : "Fila de PvP ligada: entrando na fila",
+        };
+        if (connected && status!.Vip && !status.Auto)
+            lines.Add("Conta VIP: ligando a auto-fila do jogo");
+        string screen = PvpScreens.Normalized(PvpScreen);
+        if (status is not null)
+            PvpNoScene = status.NoScene;
+        lines.Add(screen == PvpScreens.Off
+            ? "Partidas escondidas: não abrem na tela, o jogo só avisa o resultado"
+            : $"Partidas {PvpScreens.Label(screen)}s ({(screen == PvpScreens.Mini ? "a janelinha do canto" : "o replay na tela")})," +
+              $" velocidade {PvpScreens.SpeedLabel(PvpSpeed)}" +
+              (PvpScreens.NormalizedSpeed(PvpSpeed) > 0 && on && status is { SpeedReady: false, SpeedError: string why } ? $" (não aplicada: {why})" : ""));
+        if (screen != PvpScreens.Off && PvpScreens.NoSceneNote(PvpNoScene) is string noScene)
+            lines.Add("⚠ " + noScene);
+        if (status is { EcoByDeck: true })
+            lines.Add("Battery Saver desligado pelo deck para mostrar as partidas (religa ao voltar para Escondida ou desligar a fila)");
+        lines.Add("Botão direito: mostrar, minimizar ou esconder as partidas e a velocidade");
+        if (status is { Connected: false, Seen: > 0 })
+            lines.Add($"(o script viu {status.Seen} mensagens do jogo{(status.Welcomed ? ", com o welcome" : "")})");
+        if (connected && status!.Wins + status.Losses > 0)
+            lines.Add($"{status.Wins + status.Losses} partidas desde que ligou: {status.Wins} vitórias, {status.Losses} derrotas" +
+                      (status.Points is double points ? $" · {points:0} pontos" : ""));
+        if (status?.Log is { Count: > 0 } log)
+            lines.Add(log[^1]);
+        _pvp.ToolTipText = string.Join("\n", lines);
+    }
+
+    /// <summary>Por que a fila ligada não está conectada (null conectada ou desligada), para o autoteste.</summary>
+    public string? PvpWaiting { get; private set; }
+
+    /// <summary>"desligada", "na fila" ou "esperando" (a cor do ⚔), para o autoteste.</summary>
+    public string PvpState { get; private set; } = "desligada";
+
+    /// <summary>O que o bonus.js da página leu (o JSON de <see cref="Bonus.SummaryScript"/>); null sem o jogo.</summary>
+    public async Task<string?> ReadBonusAsync()
+    {
+        if (Off || !OnGame)
+            return null;
+        try
+        {
+            return await WebView.ExecuteScriptAsync(Bonus.SummaryScript);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// A dica do "rodando há": o tempo que falta do bônus das lives.
+    /// </summary>
+    public void ShowInfoTip(string? tip)
+    {
+        if (!_loginScreen)
+            _info.ToolTipText = tip;
     }
 
     /// <summary>"desligada", "ligada" ou "esperando" (a cor do carrinho), para o autoteste.</summary>
@@ -493,6 +948,7 @@ internal sealed class AccountPane : UserControl
         if (login == _loginScreen)
             return;
         _loginScreen = login;
+        Diag?.Write(login ? "parada na tela de login" : "saiu da tela de login");
         _info.ToolTipText = login
             ? "Na tela de login o jogo mantém o captcha do Cloudflare, que refaz o desafio sozinho e vai juntando " +
               "memória (centenas de MB em poucas horas). Entre na conta ou desligue-a no botão de desligar, no canto direito do cabeçalho."
@@ -537,11 +993,12 @@ internal sealed class AccountPane : UserControl
         }
         _voteText = text;
         _vote.Text = _voteShort ? VoteIcon(text) : text;
-        FitHeader();
         _vote.ForeColor = color;
         _vote.Font = highlight ? _voteBold : _header.Font;
         _vote.ToolTipText = tooltip;
         _vote.Visible = true;
+        // Depois de mostrar (e do negrito): a conta do espaço tem de ver o voto do tamanho que ele vai ter.
+        FitHeader();
     }
 
     public void HideVote()
@@ -594,12 +1051,14 @@ internal sealed class AccountPane : UserControl
     /// </summary>
     public void SetOff(bool off)
     {
+        if (off != Off)
+            Diag?.Write(off ? "conta desligada" : "conta ligada");
         Off = off;
         _offNote.Text = $"{AccountName} desligada\n\nNada roda nela: jogo, extensões, lives e voto ficam parados.\n" +
                         "Clique no botão de ligar, no canto direito do cabeçalho, para ligar.";
         _offNote.Visible = off;
         WebView.Visible = !off;
-        _reload.Visible = _mute.Visible = _lives.Visible = _restock.Visible = !off;
+        _reload.Visible = _mute.Visible = _lives.Visible = _restock.Visible = _pvp.Visible = !off;
         foreach (var item in _extensionItems)
             item.Visible = !off;
         _power.ToolTipText = off
@@ -725,7 +1184,8 @@ internal sealed class AccountPane : UserControl
 
     /// <summary>
     /// Conta estreita (em colunas): primeiro o voto fica só com o 🗳 (o tempo continua na dica e na barra de baixo),
-    /// depois sai o "rodando há", e por fim os botões perdem a folga, para nenhum sumir por falta de espaço. Com
+    /// depois sai o "rodando há", os botões perdem a folga, e por último saem os desligados: o ⚔ e o carrinho (ficam no
+    /// menu da conta, na barra de cima), para nenhum outro sumir por falta de espaço. Com
     /// espaço de novo, tudo volta.
     /// </summary>
     private void FitHeader()
@@ -734,19 +1194,36 @@ internal sealed class AccountPane : UserControl
         int Needed() => _header.Items.Cast<ToolStripItem>()
             .Where(i => i.Available)
             .Sum(i => i.GetPreferredSize(Size.Empty).Width + i.Margin.Horizontal);
+        // A conta pelo tamanho preferido sai menor que o desenho (as setinhas dos menus, o ícone da extensão): além dela,
+        // confere no próprio cabeçalho se algum botão ficou sem lugar.
+        bool Over()
+        {
+            if (Needed() > room)
+                return true;
+            _header.PerformLayout();
+            return _header.Items.Cast<ToolStripItem>().Any(i => i.Available && i.Placement == ToolStripItemPlacement.None);
+        }
         var buttons = _header.Items.Cast<ToolStripItem>().Where(i => i.Alignment == ToolStripItemAlignment.Right).ToList();
-        _header.SuspendLayout();
         buttons.ForEach(b => Roomy(b));
         SetShortVote(false);
         _info.Available = true;
-        if (Needed() > room)
+        _fitted = (RestockConfig.On, PvpOn);
+        _restock.Available = _pvp.Available = !Off;
+        if (Over())
             SetShortVote(true);
-        if (Needed() > room)
+        if (Over())
             _info.Available = false;
-        if (Needed() > room)
+        if (Over())
             buttons.ForEach(b => Roomy(b, tight: true));
-        _header.ResumeLayout();
+        if (Over() && !PvpOn)
+            _pvp.Available = false;
+        if (Over() && !RestockConfig.On)
+            _restock.Available = false;
+        _header.PerformLayout();
     }
+
+    // Com que recompra e fila (ligadas ou não) o cabeçalho foi acertado: ligar uma delas pode trazer o botão de volta.
+    private (bool Restock, bool Pvp) _fitted;
 
     private void SetShortVote(bool shortVote)
     {
@@ -759,20 +1236,6 @@ internal sealed class AccountPane : UserControl
     private static string FormatUptime(TimeSpan time) =>
         time.TotalHours >= 1 ? $"{(int)time.TotalHours} h {time.Minutes:00} min" : $"{time.Minutes} min";
 
-    private static Image? LoadIcon(ExtensionInfo extension)
-    {
-        if (extension.Icon is null)
-            return null;
-        try
-        {
-            using var stream = File.OpenRead(Path.Combine(extension.Folder, extension.Icon));
-            using var image = Image.FromStream(stream);
-            return new Bitmap(image, new Size(20, 20));
-        }
-        catch
-        {
-            // Ícone em SVG ou faltando: o botão fica com a peça de quebra-cabeça.
-            return null;
-        }
-    }
+    // Ícone em SVG ou faltando: o botão fica com a peça de quebra-cabeça.
+    private static Image? LoadIcon(ExtensionInfo extension) => ExtensionStore.IconOf(extension, 20);
 }

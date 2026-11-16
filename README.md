@@ -49,9 +49,18 @@ configurações continuam, porque não ficam no exe.
 - **Layouts:** grade 2×2, colunas ou uma conta ampliada (as outras continuam rodando escondidas, no ritmo
   normal). **F11** é tela cheia; duplo clique no cabeçalho amplia ou volta.
 - **Cabeçalho de cada conta:** ⏻ desligar, ampliar, ⟳ recarregar, som, **kick** (lives da Kick da conta),
-  🛒 recompra, 🗳 voto no TopIdle e os botões das extensões. Ao lado do nome aparece há quanto tempo a conta
+  🛒 recompra, ⚔ fila de PvP, 🗳 voto no TopIdle e os botões das extensões. Ao lado do nome aparece há quanto tempo a conta
   está rodando e os avisos (por exemplo, "na tela de login"). Com as contas em colunas, o cabeçalho se aperta
-  para nenhum botão sumir.
+  para nenhum botão sumir; se ainda faltar espaço, o ⚔ e o 🛒 desligados saem dele (os dois ficam no botão
+  direito da conta, na barra de cima).
+- **Jogo que não abre:** se a página carrega mas o jogo fica na tela de abertura (o logo com a barra de carga),
+  sem conectar nem mostrar o login, em 60 s o deck recarrega a conta sozinho; se de novo não abrir, espera mais a
+  cada vez (2 min, 3 min… até 5 min). Página que nem carregou (sem internet, site fora do ar) também é tentada de
+  novo. Cada recarga vai para `aberturas.log`, na pasta do deck, com onde o jogo parou (a % da carga).
+- **Janelas no tema do deck:** as de configuração (Lives → Config…, recompra,
+  registro dos resgates, extensões, resgate em lote) e as caixas de aviso são escuras, com cantos arredondados e
+  botões em português com o verbo (os que apagam ou gastam em vermelho). O registro de cada janela fica recolhido:
+  abre no **▸ Registro**. As explicações ficam nas dicas (passe o mouse no ⓘ).
 - **Zoom:** **− Zoom 100% +** na barra de cima muda todas as contas juntas (na setinha, de 50% a 150%).
   Ampliar uma conta põe o zoom em 100%; voltar para a grade ou as colunas devolve o zoom de antes (por
   exemplo, 50% para as 4 contas caberem na tela).
@@ -77,16 +86,79 @@ A cada segundo o deck confere quanto a conta tem e compra no **Market do NPC** o
 
 - **Pokebola:** a que você escolher (Ultra Ball de fábrica).
 - **Revives:** contados juntos; compra sempre o mais barato.
-- **Poções:** contadas juntas; compra a **Ultimate Potion** de fábrica, ou a de **melhor custo-benefício**: o
-  ouro por HP que ela cura de verdade no pokémon ativo. Como a automação "Usar Poções" do jogo só usa a poção
-  abaixo do limiar (30% de fábrica), cura além do que falta se perde. A Golden Potion fica de fora.
+- **Poções:** contadas juntas; compra a de **melhor custo-benefício** de fábrica (o ouro por HP que ela cura de verdade
+  no pokémon ativo: como a automação "Usar Poções" do jogo só usa a poção abaixo do limiar, 30% de fábrica, cura além
+  do que falta se perde), ou a que você escolher. A recompra nunca configurada (desligada, com a Ultimate Potion, a de
+  fábrica de antes) passa para o custo-benefício. A Golden Potion fica de fora.
 - Opcional: pôr a poção escolhida em 1º na fila do "Usar Poções", para ela ser gasta primeiro.
+- **Automações do jogo:** ligada, a recompra marca nas Automações do jogo o que ela compra: "Usar Poções", "Usar
+  Revive" (com o revive dela entre os escolhidos) e, com VIP (o jogo só lança sozinho para VIP), "Lançar sem parar"
+  com a pokebola dela em 1º. Desmarcou no jogo com a recompra ligada: ela marca de novo.
 - **Ouro mínimo:** nunca compra a ponto de o ouro ficar abaixo dele. Se o ouro não der para tudo, compra
   primeiro poção, depois revive, depois pokebola.
 - Até 9.999 por compra, uma compra a cada 4 s, pelo mesmo pedido do botão Comprar do jogo. Se o jogo recusar,
   espera 30 s; 3 compras seguidas sem resposta dão 2 min de pausa.
 - Cada conta tem a sua configuração. A janela mostra o estoque, o ouro e o registro das compras; o carrinho
   do cabeçalho fica verde quando está ligada e com o jogo conectado.
+
+### ⚔ Fila de PvP
+
+O ⚔ no cabeçalho de cada conta (e no clique direito da conta na barra) liga a fila do PvP ranqueado: a conta entra na
+fila e volta depois de cada partida, esperando o tempo que o jogo pede entre elas; desligar tira da fila. Conta VIP: o
+deck liga também a auto-fila do próprio jogo (que segue com a página fechada). O ⚔ fica verde na fila, amarelo
+esperando e apagado desligado; a dica tem há quanto tempo está na fila, as partidas desde que ligou (vitórias e
+derrotas) e, se não conectar, o motivo. Sem VIP quem volta para a fila é o deck: o jogo reserva a auto-fila para VIP.
+
+**Botão direito no ⚔** (ou "⚔ Fila de PvP" no menu da conta): como as partidas da fila aparecem — **mostrada** (o
+replay na tela), **minimizada** (a janelinha do canto) ou **escondida** (de fábrica: o jogo só avisa o resultado) — e,
+para mostrada e minimizada, a **velocidade**: a do jogo (acelera só para caber até a próxima) ou 1×, 2×, 4×, 8×, 16×,
+32×. Vale por conta (deck.json `PvpScreen`/`PvpSpeed`; "Usar nas outras contas" copia), com a fila ligada, a partir da
+próxima partida. A tela é a "Tela da batalha" do PvP do jogo, que o deck mantém na escolhida. A velocidade: o replay do
+jogo não guarda nenhuma, então o deck pega as classes dele (`/replay.mjs`, `/replay-tabuleiro.mjs`, com um `import` do
+mesmo endereço que o jogo já baixou, que devolve o mesmo módulo) e, no primeiro play do replay aberto junto com uma
+partida da fila, põe a velocidade; os botões de velocidade do replay seguem valendo. Replays que a pessoa abre no jogo
+não mudam. O Battery Saver (Modo Economia) do jogo esconde as partidas de qualquer jeito: com a fila ligada e a luta
+mostrada ou minimizada, o deck desliga ele pelo "Sair" do próprio jogo e, ao voltar para Escondida ou desligar a fila,
+religa (só se foi o deck que desligou; localStorage `deckPvpSemEconomia`). A tela ULTRA também esconde: o deck só avisa.
+
+### ⟳ Recarregar limpo
+
+O ⟳ no cabeçalho de cada conta (e "Recarregar limpo" no clique direito dela) apaga o cache de disco do perfil da conta
+e, só do site do jogo, o Cache Storage e os service workers, e recarrega sem o cache. O login (que o jogo guarda no
+localStorage), os cookies da Twitch e da Kick e as extensões ficam. O vigia do jogo que não abre (a conta presa na tela
+de abertura por mais de 60 s depois de carregar a página) recarrega normal na 1ª vez e limpo da 2ª em diante. Ele não
+recarrega com o aviso "conta aberta em outro lugar" à vista (tomaria a sessão do outro aparelho) nem com um aviso da conta
+(limite de contas no mesmo IP, sessão inválida): só anota no cabeçalho. Depois que o jogo abre, só volta a vigiar na
+próxima vez que a página carregar.
+
+### Apagar os dados da conta
+
+Para a conta que continua travada depois da carga mesmo com o ⟳: o jogo guarda o login e o id do aparelho no
+localStorage, e o recarregar limpo deixa os dois. No clique direito da conta (barra de cima), **Apagar os dados da conta
+(entrar de novo)…** sai do jogo, apaga e abre o jogo na tela de login:
+
+- **Apagar o jogo:** tudo o que o site do jogo guarda na conta (localStorage, IndexedDB, cookies, os do Cloudflare
+  também, Cache Storage e service workers) e o cache de disco do perfil. A Twitch e a Kick continuam logadas.
+- **Apagar tudo:** o mesmo e os cookies de todos os sites: sai também da Twitch e da Kick (as lives da conta reabrem
+  pedindo o login).
+
+As extensões, as configurações delas e as do deck (nome, recompra, fila de PvP) ficam.
+
+### 🩺 Diagnóstico: o jogo que não carrega
+
+Para quando o jogo não carrega num PC onde não dá para olhar. O deck anota, por conta, em
+`%LOCALAPPDATA%\PokeIdleMulti\diagnostico\contaN.log`, o caminho da página até o jogo abrir: a navegação (o HTTP, o
+Cloudflare, o relógio do PC comparado com o do site), os arquivos do jogo e os pedidos que falharam ou voltaram com erro,
+o socket do jogo (abriu, conectou, fechou), os erros de JavaScript e do console, cada etapa da tela de abertura e os
+processos do navegador que caíram. Quando o vigia recarrega, anota antes um retrato da página (o que está à vista, a
+etapa da carga, os scripts, o WebGL) e salva um print. Depois que o jogo abre, só as falhas. O `deck.log` da mesma pasta
+tem a abertura do deck (Windows e WebView2) e os erros que derrubaram o deck.
+
+**🩺 Gerar diagnóstico** (no canto direito da barra de baixo, ou no clique direito da conta) junta tudo num .zip na Área
+de trabalho, com um relatório do PC (Windows, memória, placa de vídeo, proxy, arquivo hosts, antivírus, WebView2), da
+rede fora do navegador (o DNS e o site do jogo) e de cada conta agora (status, extensões, um retrato e um print). É
+esse arquivo que a pessoa manda. Nada de senha, token, cookie ou valor do localStorage (só os nomes das chaves), e os
+endereços vão sem o `?…`.
 
 ### Lives para o bônus de XP
 
@@ -103,6 +175,9 @@ A cada segundo o deck confere quanto a conta tem e compra no **Market do NPC** o
   aberta. Cada live toca só o player da Kick (player.kick.com), que rende os pontos igual à página do canal e
   gasta uns 40% menos; o vídeo vem na menor qualidade, sem propaganda nem rastreadores, numa janela fora da
   tela. A cada 30 s o deck confere se cada live está tocando e recarrega a que travou ou caiu.
+- **Lives leves (sempre, desde 12/11/2026):** o player da Twitch abre parado e o da Kick em branco (abrem só para o baú
+  e os resgates), e quem assiste é o deck, sem navegador. Rende igual e gasta quase nada. Saiu a opção de cada conta
+  em Lives → Config…; o player com vídeo segue no código, para o caso de precisar de novo.
 - **Botão lives** de cada conta (no cabeçalho): escolher qual live da Kick ou da Twitch fechar nela (ou todas de
   um site), e abrir de novo. A vaga de uma live fechada não abre outra sozinha. O botão fica marcado enquanto
   houver live fechada.
@@ -123,6 +198,20 @@ A cada segundo o deck confere quanto a conta tem e compra no **Market do NPC** o
   acumulam no jogo. O saldo e o último resgate aparecem no menu Lives, ao lado de cada live. Resgate recusado:
   tenta de novo naquele canal em 30 min. Se os pontos voltarem (site não vinculado no jogo), o deck para de
   resgatar naquela conta e avisa; salvar Lives → Config… de novo volta a resgatar.
+- **Guarda do bônus** (Lives → Config…, coluna "Guarda", ligada de fábrica em todas as contas): o resgate automático
+  só usa os pontos das lives abertas, e quando os streamers delas saem do ar o bônus vence com pontos parados em outros
+  canais. Quando o bônus escolhido da conta num site vence em menos de 30 min (ou venceu), o deck lê o saldo dos canais da
+  lista e dos oficiais do jogo que não estão abertos na conta, escolhe um com os pontos (offline primeiro; depois o de
+  mais pontos) e resgata 1 ali, numa página escondida do canal. Depois confere no jogo se o tempo do bônus subiu; se não
+  subir (site não vinculado), para a guarda naquele site por 1 h e diz no registro. Sem canal com os pontos, avisa uma vez.
+  O tempo que falta de cada bônus fica na dica do cabeçalho da conta.
+- **Bônus pausado no canal:** cada bônus vem em 4 durações (1, 3, 5 e 10 h, com o preço proporcional). O deck
+  resgata o mais barato **liberado**: com o de 1 h pausado pelo canal, vai o de 3, 5 ou 10 h (o mesmo por hora).
+  Com todas pausadas, não resgata, mostra "pausado" ao lado do saldo no menu Lives e diz no registro, uma vez,
+  por que o saldo não está sendo usado.
+- **Pontos gastos fora do deck:** se o saldo de um canal cai sem resgate do deck (a conta aberta em outro
+  aparelho ou programa, ou um resgate na mão), o registro diz quanto caiu. Se foi um resgate do deck cuja
+  resposta se perdeu (o player não respondeu), o registro diz que ele passou.
 
 ### 🗳 Voto no TopIdle
 
@@ -148,10 +237,11 @@ Quase tudo se configura pelas janelas do deck, e fica salvo sozinho em
 
 | Onde | O quê |
 |---|---|
-| Botão direito na conta, na barra de cima | Renomear, recarregar, som, desligar, lives nesta conta |
+| Botão direito na conta, na barra de cima | Renomear, apagar os dados (entrar de novo), recarregar, som, desligar, lives nesta conta, diagnóstico, recompra, fila de PvP |
 | **Lives** | Quais contas abrem lives; mostrar a janela das lives |
 | **Lives → Config…** | Canais da Twitch e da Kick (em ordem de prioridade), quantas lives da Twitch e da Kick abrir por conta, o resgate automático dos pontos (qual bônus cada conta resgata em cada site) e o baú da Twitch |
 | **🛒** no cabeçalho | Recompra da conta: pokebola, revives, poções, ouro mínimo |
+| **⚔** no cabeçalho | Fila de PvP da conta (clique); botão direito: como as partidas aparecem e a velocidade |
 | **⚡ ULTRA** (setinha) | ULTRA em todas as contas e o menos animações |
 | **− Zoom +** | Zoom de todas as contas |
 | **🧩 Extensões** | Extensões de cada conta |
@@ -209,6 +299,9 @@ abre no monitor principal. Apague a pasta `selftest` antes de cada rodada.
 | `LivesWindow.cs`, `TwitchLive.cs`, `KickLive.cs`, `VideoQuality.cs`, `AdBlock.cs` | As lives da Twitch e da Kick |
 | `ConsumptionTest.cs` | O teste de consumo das lives (`PokeIdleMulti.exe --consumo`) |
 | `Restock.cs`, `RestockWindow.cs`, `recompra.js` | A recompra (o script roda na página do jogo) |
+| `Pvp.cs`, `pvp.js` | A fila de PvP, a tela e a velocidade das partidas (o script roda na página do jogo) |
+| `BonusGuard.cs`, `bonus.js` | A guarda do bônus das lives (o bonus.js lê no jogo o tempo que falta do bônus) |
+| `Diag.cs` | O 🩺 diagnóstico do jogo que não carrega (os logs por conta e o .zip para mandar) |
 | `Echo.cs` | O eco de cliques |
 | `TopIdle.cs` | O voto no TopIdle |
 | `ExtensionStore.cs`, `ExtensionsDialog.cs`, `StorageImport.cs`, `RotomSniper.cs` | As extensões |

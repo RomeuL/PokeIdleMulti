@@ -35,7 +35,8 @@ internal sealed class ConsumptionTest : Form
         Icon = Theme.AppIcon;
         ShowInTaskbar = true;
         Size = new Size(420, 120);
-        // Abre num monitor que não é o principal (onde o usuário joga), quando tem mais de um, e sem pegar o foco.
+        // Abre na Área de trabalho 2 do Windows (TestDesktop); sem ela, num monitor que não é o principal (onde o usuário
+        // joga), quando tem mais de um. Sempre sem pegar o foco.
         StartPosition = FormStartPosition.Manual;
         var area = (Screen.AllScreens.FirstOrDefault(s => !s.Primary) ?? Screen.PrimaryScreen!).WorkingArea;
         Location = new Point(area.X + (area.Width - Width) / 2, area.Y + (area.Height - Height) / 2);
@@ -58,6 +59,7 @@ internal sealed class ConsumptionTest : Form
         }
         finally
         {
+            _log.Add("Janelas: " + TestDesktop.Summary);
             File.WriteAllText(Report, string.Join(Environment.NewLine, _log));
             Close();
         }

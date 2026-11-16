@@ -88,6 +88,74 @@ internal sealed class PointsRedeemer
 
         /// <summary>Já avisou que a live aberta não está rendendo os pontos de assistir (volta com o próximo).</summary>
         public bool QuietNoted { get; set; }
+
+        /// <summary>O bônus escolhido está pausado no canal (todas as durações dele).</summary>
+        public bool Paused { get; set; }
+
+        /// <summary>Por que o saldo que daria não resgata (já foi para o registro; null: nada segurando).</summary>
+        public string? Blocked { get; set; }
+
+        /// <summary>Quando saiu um script que pode resgatar e ainda não voltou (os avisos da Twitch esperam por ele).</summary>
+        public DateTime? SpendingSince { get; set; }
+
+        /// <summary>O script que podia resgatar, com saldo para isso, e não respondeu: o saldo que cair foi ele.</summary>
+        public DateTime? UnansweredAt { get; set; }
+    }
+
+    // Saldo que cai mais que isso sem resgate do deck (descontado o que entrou) foi gasto em outro lugar com a conta.
+    private const int DropLimit = 100;
+
+    // O script que pode resgatar ainda está rodando (depois disso, sumiu: a live fechou no meio).
+    private static bool Spending(Channel c) => c.SpendingSince is DateTime since && DateTime.Now - since < TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// O saldo caiu sem resgate do deck: o resgate que ficou sem resposta do player (passou mesmo), ou pontos gastos em
+    /// outro lugar com esta conta (outro aparelho, outro programa, à mão). Vai para o registro; devolve o aviso para o
+    /// cabeçalho no segundo caso. <paramref name="gained"/>: o que entrou junto com este saldo (o baú, um aviso de pontos).
+    /// </summary>
+    private string? Dropped(string channel, Channel c, int balance, int gained)
+    {
+        if (c.Points is not int before || balance >= before + gained - DropLimit)
+            return null;
+        int spent = before + gained - balance;
+        if (c.UnansweredAt is DateTime at && DateTime.Now - at < TimeSpan.FromMinutes(10))
+        {
+            c.UnansweredAt = null;
+            c.RedeemedAt = at;
+            Log?.Invoke($"{channel}: o resgate das {at:HH:mm} passou, mas o player não tinha respondido (saldo {before} → {balance})");
+            return null;
+        }
+        Log?.Invoke($"{channel}: o saldo caiu de {before} para {balance} sem resgate do deck ({spent} pontos gastos em outro lugar com esta conta?)");
+        return $"{Site}: {spent} pontos de {channel} gastos fora do deck";
+    }
+
+    /// <summary>
+    /// Anota por que o saldo não resgata (<paramref name="reason"/>; null: liberou). Vai para o registro uma vez, quando muda.
+    /// </summary>
+    private void Block(string channel, Channel c, int balance, string? reason)
+    {
+        if (reason == c.Blocked)
+            return;
+        c.Blocked = reason;
+        if (reason is not null)
+            Log?.Invoke($"{channel}: {balance} pontos, mas {reason}");
+    }
+
+    /// <summary>
+    /// Esquece o saldo do canal (o resgate em lote gastou por fora do resgate automático): a próxima conferência começa
+    /// dela, sem achar que os pontos foram gastos em outro lugar.
+    /// </summary>
+    public void Forget(string channel)
+    {
+        if (_channels.TryGetValue(channel, out var c))
+            c.Points = null;
+    }
+
+    private Channel Touch(string channel)
+    {
+        if (!_channels.TryGetValue(channel, out var c))
+            _channels[channel] = c = new Channel();
+        return c;
     }
 
     /// <summary>O id da conta na Twitch (a conferência lê; os avisos da conta usam).</summary>
@@ -122,8 +190,7 @@ internal sealed class PointsRedeemer
     /// </summary>
     public string? Earned(string channel, string reason, int points, int? balance)
     {
-        if (!_channels.TryGetValue(channel, out var c))
-            _channels[channel] = c = new Channel();
+        var c = Touch(channel);
         var now = DateTime.Now;
         c.Gains.Add((now, points));
         c.Gains.RemoveAll(g => now - g.At > TimeSpan.FromHours(1));
@@ -132,12 +199,18 @@ internal sealed class PointsRedeemer
             c.WatchedAt = now;
             c.QuietNoted = false;
         }
+        string? spent = null;
         if (balance is int b)
+        {
+            // Com um resgate do deck no ar, o saldo do aviso já pode ter o resgate: quem confere é a resposta dele.
+            if (!Spending(c))
+                spent = Dropped(channel, c, b, points);
             c.Points = b;
+        }
         if (reason is "WATCH" or "CLAIM")
-            return null;
+            return spent;
         Log?.Invoke($"{channel}: ganhou +{points} {Reason(reason)}" + (balance is int saldo ? $" (saldo {saldo})" : ""));
-        return $"{Site}: +{points} {Reason(reason)} em {channel}";
+        return spent ?? $"{Site}: +{points} {Reason(reason)} em {channel}";
     }
 
     /// <summary>
@@ -234,7 +307,7 @@ internal sealed class PointsRedeemer
 
     /// <summary>Só o saldo do canal, com o custo do bônus ("230/300"; "" antes da primeira leitura), para o resumo curto.</summary>
     public string Balance(string channel) => _channels.TryGetValue(channel, out var c) && c.Points is int points
-        ? c.Cost is int cost ? $"{points}/{cost}" : $"{points}"
+        ? c.Cost is int cost ? $"{points}/{cost}" + (c.Paused ? " pausado" : "") : $"{points}"
         : "";
 
     // A partir desse saldo os pontos do último resgate voltaram (metade do custo: assistir dá 10 a cada 5 min, e o
@@ -266,6 +339,8 @@ internal sealed class PointsRedeemer
     public string KickScript(string api, string channel, string token, KickReward reward)
     {
         var (spend, refund) = Plan(channel);
+        if (spend)
+            Touch(channel).SpendingSince = DateTime.Now;
         var args = JsonSerializer.Serialize(new { api, channel, token, word = Word(reward), spend, refund });
         return "(async a => {" +
                " const call = (path, init) => fetch(a.api + '/api/v2/channels/' + encodeURIComponent(a.channel) + path," +
@@ -279,11 +354,13 @@ internal sealed class PointsRedeemer
                "  r = await call('/rewards');" +
                "  if (!r.ok) return { points, error: 'bônus: erro ' + r.status };" +
                "  const word = new RegExp(a.word, 'i');" +
-               // Cada bônus vem em 4 durações (1, 3, 5 e 10 h, com o preço proporcional): vale o mais barato, o de 1 h.
-               "  const reward = ((await r.json())?.data || []).slice().sort((x, y) => x.cost - y.cost).find(x => x.is_enabled && word.test(x.title || '')" +
+               // Cada bônus vem em 4 durações (1, 3, 5 e 10 h, com o preço proporcional): vale o mais barato liberado (o
+               // de 1 h; pausado no canal, o de 3, 5 ou 10 h, que dá o mesmo por hora).
+               "  const all = ((await r.json())?.data || []).slice().sort((x, y) => x.cost - y.cost).filter(x => x.is_enabled && word.test(x.title || '')" +
                "   && /pokeidle/i.test((x.title || '') + ' ' + (x.description || '')));" +
+               "  const reward = all.find(x => !x.is_paused) || all[0];" +
                "  if (!reward) return { points, error: 'canal sem o bônus' };" +
-               "  const out = { points, cost: reward.cost, title: reward.title, paused: !!reward.is_paused };" +
+               "  const out = { points, cost: reward.cost, title: reward.title, paused: !!reward.is_paused, cheapest: all[0].cost };" +
                "  if (!a.spend || reward.is_paused || points < reward.cost || (a.refund !== null && points >= a.refund)) return out;" +
                // O transaction_id é um ULID novo, como o site gera: o tempo em base 32 e mais 16 letras ao acaso.
                "  const abc = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'; let t = Date.now(), id = '';" +
@@ -311,6 +388,8 @@ internal sealed class PointsRedeemer
     {
         var (canSpend, refund) = Plan(channel);
         spend = spend && canSpend;
+        if (spend && reward is not null)
+            Touch(channel).SpendingSince = DateTime.Now;
         _channels.TryGetValue(channel, out var c);
         // O baú do aviso é um baú novo (outro id): vai mesmo com a espera de 30 min de um erro antes.
         claim = claim && (claimId is not null || c is null || DateTime.Now >= c.ClaimRetryAt);
@@ -340,11 +419,14 @@ internal sealed class PointsRedeemer
                "  }" +
                "  if (!a.word) return out;" +
                "  const word = new RegExp(a.word, 'i');" +
-               // A Twitch lista os bônus fora de ordem, e cada um vem em 4 durações: vale o mais barato, o de 1 h.
-               "  const reward = (user.channel.communityPointsSettings?.customRewards || []).slice().sort((x, y) => x.cost - y.cost).find(x => x.isEnabled && word.test(x.title || '')" +
+               // A Twitch lista os bônus fora de ordem, e cada um vem em 4 durações: vale o mais barato liberado (o de 1 h;
+               // pausado, esgotado ou em espera no canal, o de 3, 5 ou 10 h, que dá o mesmo por hora).
+               "  const all = (user.channel.communityPointsSettings?.customRewards || []).slice().sort((x, y) => x.cost - y.cost).filter(x => x.isEnabled && word.test(x.title || '')" +
                "   && /pokeidle/i.test((x.title || '') + ' ' + (x.prompt || '')));" +
+               "  const shut = x => x.isPaused || !x.isInStock || !!x.cooldownExpiresAt;" +
+               "  const reward = all.find(x => !shut(x)) || all[0];" +
                "  if (!reward) return { ...out, error: 'canal sem o bônus' };" +
-               "  Object.assign(out, { cost: reward.cost, title: reward.title, paused: reward.isPaused || !reward.isInStock || !!reward.cooldownExpiresAt });" +
+               "  Object.assign(out, { cost: reward.cost, title: reward.title, paused: shut(reward), cheapest: all[0].cost });" +
                "  if (!a.spend || out.paused || points < reward.cost || (a.refund !== null && points >= a.refund)) return out;" +
                // O transactionID é um id novo a cada resgate (32 letras hexadecimais). O custo, o título e a descrição
                // (prompt) vão iguais aos do bônus no canal: a Twitch confere e, se não baterem, recusa (PROPERTIES_MISMATCH).
@@ -414,28 +496,33 @@ internal sealed class PointsRedeemer
             if (reward is not KickReward chosen)
                 return JsonSerializer.Serialize(new { points, me, channelId, claimId });
             var word = new System.Text.RegularExpressions.Regex(Word(chosen), System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-            JsonElement? found = null;
+            var matching = new List<(int Cost, JsonElement Reward)>();
             if (ch.TryGetProperty("communityPointsSettings", out var settings) && settings.ValueKind == JsonValueKind.Object
                 && settings.TryGetProperty("customRewards", out var rewards) && rewards.ValueKind == JsonValueKind.Array)
                 foreach (var r in rewards.EnumerateArray())
                 {
                     string title = r.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "";
                     string prompt = r.TryGetProperty("prompt", out var p) ? p.GetString() ?? "" : "";
-                    // Cada bônus vem em 4 durações (1, 3, 5 e 10 h), fora de ordem: vale o mais barato, o de 1 h.
                     if (r.TryGetProperty("isEnabled", out var on) && on.ValueKind == JsonValueKind.True && word.IsMatch(title)
                         && (title + " " + prompt).Contains("pokeidle", StringComparison.OrdinalIgnoreCase)
-                        && r.TryGetProperty("cost", out var price) && price.TryGetInt32(out int cost)
-                        && (found is not JsonElement best || cost < best.GetProperty("cost").GetInt32()))
-                        found = r;
+                        && r.TryGetProperty("cost", out var price) && price.TryGetInt32(out int cost))
+                        matching.Add((cost, r));
                 }
-            if (found is not JsonElement bonus)
+            if (matching.Count == 0)
                 return JsonSerializer.Serialize(new { points, me, channelId, claimId, error = "canal sem o bônus" });
-            bool paused = (bonus.TryGetProperty("isPaused", out var ip) && ip.ValueKind == JsonValueKind.True)
-                          || (bonus.TryGetProperty("isInStock", out var stock) && stock.ValueKind == JsonValueKind.False)
-                          || (bonus.TryGetProperty("cooldownExpiresAt", out var cool) && cool.ValueKind == JsonValueKind.String);
+            static bool Shut(JsonElement r) => (r.TryGetProperty("isPaused", out var ip) && ip.ValueKind == JsonValueKind.True)
+                                               || (r.TryGetProperty("isInStock", out var stock) && stock.ValueKind == JsonValueKind.False)
+                                               || (r.TryGetProperty("cooldownExpiresAt", out var cool) && cool.ValueKind == JsonValueKind.String);
+            // Cada bônus vem em 4 durações (1, 3, 5 e 10 h), fora de ordem: vale o mais barato liberado (o de 1 h; pausado,
+            // esgotado ou em espera no canal, o de 3, 5 ou 10 h, que dá o mesmo por hora).
+            matching.Sort((x, y) => x.Cost.CompareTo(y.Cost));
+            var (bonusCost, bonus) = matching.FirstOrDefault(m => !Shut(m.Reward));
+            if (bonus.ValueKind == JsonValueKind.Undefined)
+                (bonusCost, bonus) = matching[0];
             return JsonSerializer.Serialize(new
             {
-                points, me, channelId, claimId, cost = bonus.GetProperty("cost").GetInt32(), title = bonus.GetProperty("title").GetString(), paused,
+                points, me, channelId, claimId, cost = bonusCost, title = bonus.GetProperty("title").GetString(), paused = Shut(bonus),
+                cheapest = matching[0].Cost,
             });
         }
         catch (Exception e) when (e is HttpRequestException or TaskCanceledException or JsonException or InvalidOperationException
@@ -481,8 +568,7 @@ internal sealed class PointsRedeemer
                     if (rewardsDoc is null)
                         return JsonSerializer.Serialize(new { points, error = $"bônus: erro {rewardsStatus}" });
                     var word = new System.Text.RegularExpressions.Regex(Word(reward), System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                    // Cada bônus vem em 4 durações (1, 3, 5 e 10 h): vale o mais barato, o de 1 h.
-                    JsonElement? found = null;
+                    var matching = new List<(int Cost, JsonElement Reward)>();
                     if (rewardsDoc.RootElement.TryGetProperty("data", out var list) && list.ValueKind == JsonValueKind.Array)
                         foreach (var r in list.EnumerateArray())
                         {
@@ -490,14 +576,22 @@ internal sealed class PointsRedeemer
                             string about = r.TryGetProperty("description", out var d) ? d.GetString() ?? "" : "";
                             if (r.TryGetProperty("is_enabled", out var on) && on.ValueKind == JsonValueKind.True && word.IsMatch(title)
                                 && (title + " " + about).Contains("pokeidle", StringComparison.OrdinalIgnoreCase)
-                                && r.TryGetProperty("cost", out var price) && price.TryGetInt32(out int cost)
-                                && (found is not JsonElement best || cost < best.GetProperty("cost").GetInt32()))
-                                found = r;
+                                && r.TryGetProperty("cost", out var price) && price.TryGetInt32(out int cost))
+                                matching.Add((cost, r));
                         }
-                    if (found is not JsonElement bonus)
+                    if (matching.Count == 0)
                         return JsonSerializer.Serialize(new { points, error = "canal sem o bônus" });
-                    bool paused = bonus.TryGetProperty("is_paused", out var ip) && ip.ValueKind == JsonValueKind.True;
-                    return JsonSerializer.Serialize(new { points, cost = bonus.GetProperty("cost").GetInt32(), title = bonus.GetProperty("title").GetString(), paused });
+                    static bool Shut(JsonElement r) => r.TryGetProperty("is_paused", out var ip) && ip.ValueKind == JsonValueKind.True;
+                    // Cada bônus vem em 4 durações (1, 3, 5 e 10 h): vale o mais barato liberado (o de 1 h; pausado no canal, o
+                    // de 3, 5 ou 10 h, que dá o mesmo por hora).
+                    matching.Sort((x, y) => x.Cost.CompareTo(y.Cost));
+                    var (bonusCost, bonus) = matching.FirstOrDefault(m => !Shut(m.Reward));
+                    if (bonus.ValueKind == JsonValueKind.Undefined)
+                        (bonusCost, bonus) = matching[0];
+                    return JsonSerializer.Serialize(new
+                    {
+                        points, cost = bonusCost, title = bonus.GetProperty("title").GetString(), paused = Shut(bonus), cheapest = matching[0].Cost,
+                    });
                 }
             }
         }
@@ -586,15 +680,19 @@ internal sealed class PointsRedeemer
         if (c.CheckedAt is not DateTime last || checkedNow - last > TimeSpan.FromMinutes(5))
             c.OpenSince = checkedNow;
         c.CheckedAt = checkedNow;
-        int? points = null, cost = null, status = null;
+        int? points = null, cost = null, status = null, cheapest = null;
         string? error = null, title = null, refused = null, claimError = null;
         bool redeemed = false, paused = false, claimed = false;
+        // A resposta do script que podia resgatar chegou (ou não vai chegar): os avisos da Twitch voltam a conferir o saldo.
+        bool wasSpending = c.SpendingSince is not null;
+        c.SpendingSince = null;
         try
         {
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
             points = root.TryGetProperty("points", out var p) && p.TryGetInt32(out int pv) ? pv : null;
             cost = root.TryGetProperty("cost", out var k) && k.TryGetInt32(out int kv) ? kv : null;
+            cheapest = root.TryGetProperty("cheapest", out var lo) && lo.TryGetInt32(out int lv) ? lv : null;
             status = root.TryGetProperty("status", out var s) && s.TryGetInt32(out int sv) ? sv : null;
             error = root.TryGetProperty("error", out var e) ? e.GetString() : null;
             title = root.TryGetProperty("title", out var t) ? t.GetString() : null;
@@ -611,6 +709,9 @@ internal sealed class PointsRedeemer
         catch (JsonException)
         {
             error = "a live não respondeu";
+            // O script que podia resgatar, com saldo para isso, sumiu: o resgate pode ter passado sem a resposta chegar.
+            if (wasSpending && c.Points is int known && c.Cost is int needed && known >= needed)
+                c.UnansweredAt = DateTime.Now;
         }
 
         // O baú (só na Twitch): pegou, ou deu errado e espera 30 min para tentar de novo naquele canal. NOT_FOUND é o
@@ -636,15 +737,18 @@ internal sealed class PointsRedeemer
             c.Text = error ?? "a live não respondeu";
             return null;
         }
+        // Antes de anotar o saldo novo: caiu sem resgate do deck?
+        string? note = Dropped(channel, c, balance, claimed ? 50 : 0);
         if (cost is not int price)
         {
             // Sem bônus escolhido (só o baú) ou o canal sem o bônus: só o saldo.
             c.Points = balance;
+            c.Paused = false;
             c.Text = $"{balance} pontos{bonus}" + (error is not null ? $", {error}" : "");
-            return null;
+            Block(channel, c, balance, error == "canal sem o bônus" ? "o canal está sem o bônus escolhido" : null);
+            return note;
         }
 
-        string? note = null;
         if (RefundAt(c) is int limit && balance >= limit && Stopped is null)
         {
             Stopped = Site == LiveSite.Kick
@@ -656,13 +760,17 @@ internal sealed class PointsRedeemer
         }
         c.Cost = price;
         c.Points = balance;
+        c.Paused = paused;
+        c.UnansweredAt = null;
+        // O de 1 h pausado no canal: o deck está no mais barato liberado (3, 5 ou 10 h).
+        string skipped = cheapest is int low && low < price ? $"o de {low} pontos está pausado no canal" : "";
         string? refusal = status?.ToString() ?? refused;
         if (redeemed)
         {
             c.Points = balance - price;
             c.RedeemedAt = DateTime.Now;
             note = $"{Site}: resgatei {title} em {channel}";
-            Log?.Invoke($"{channel}: resgatou {title} ({price} pontos; sobraram {balance - price})");
+            Log?.Invoke($"{channel}: resgatou {title} ({price} pontos; sobraram {balance - price}" + (skipped.Length > 0 ? $"; {skipped}" : "") + ")");
         }
         else if (refusal is not null)
         {
@@ -670,10 +778,17 @@ internal sealed class PointsRedeemer
             note = $"{Site}: o resgate em {channel} foi recusado (erro {refusal}); tento de novo em 30 min";
             Log?.Invoke($"{channel}: o resgate de {title} foi recusado (erro {refusal}; saldo {balance}); tento de novo em 30 min");
         }
+        // O saldo daria para o bônus de 1 h, mas não resgatou: o porquê vai para o registro (uma vez, quando muda).
+        string? held = null;
+        if (!redeemed && refusal is null && Stopped is null && balance >= (cheapest ?? price))
+            held = paused ? "o bônus está pausado no canal (todas as durações); resgato quando liberar"
+                : balance < price ? $"{skipped} e o mais barato liberado custa {price}; resgato quando o saldo chegar"
+                : null;
+        Block(channel, c, balance, held);
         c.Text = $"{c.Points}/{price} pontos"
                  + (c.RedeemedAt is DateTime at ? $", resgatou {at:HH:mm}" : "")
                  + (refusal is not null && !redeemed ? $", resgate recusado ({refusal})" : "")
-                 + (paused ? ", bônus pausado no canal" : "")
+                 + (paused ? ", bônus pausado no canal" : skipped.Length > 0 ? $", {skipped} (vai o de {price})" : "")
                  + bonus;
         return note;
     }
