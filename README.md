@@ -81,22 +81,28 @@ configurações continuam, porque não ficam no exe.
 
 ### 🛒 Recompra de pokebolas, revives e poções
 
-A cada segundo o deck confere quanto a conta tem e compra no **Market do NPC** o que ficou abaixo de
-"Recomprar abaixo de", até chegar em "Manter".
+A cada segundo o deck confere quanto a conta tem. Quando um item fica abaixo de "quando tiver menos de", compra
+o lote de "Comprar" no **Market do NPC**, uma vez, e só volta a comprar quando cair abaixo de novo (comprar 30.000
+quando tiver menos de 5.000 fica com uns 35.000). Os valores de fábrica são pequenos, para quem está começando
+(Poke Ball 500 abaixo de 100, revive 10 abaixo de 3, poção 100 abaixo de 30, ouro mínimo 10.000): aumente conforme
+o ouro. O deck.json de antes ("Manter") passa sozinho: a recompra nunca configurada fica com os de fábrica; a
+configurada compra o que levava ao "Manter" (Manter − abaixo de).
 
-- **Pokebola:** a que você escolher (Ultra Ball de fábrica).
+- **Pokebola:** a que você escolher (Poke Ball de fábrica).
 - **Revives:** contados juntos; compra sempre o mais barato.
 - **Poções:** contadas juntas; compra a de **melhor custo-benefício** de fábrica (o ouro por HP que ela cura de verdade
   no pokémon ativo: como a automação "Usar Poções" do jogo só usa a poção abaixo do limiar, 30% de fábrica, cura além
   do que falta se perde), ou a que você escolher. A recompra nunca configurada (desligada, com a Ultimate Potion, a de
-  fábrica de antes) passa para o custo-benefício. A Golden Potion fica de fora.
+  fábrica de antes) passa para o custo-benefício. A Golden Potion (cura % do HP) está na lista e conta com as poções.
 - Opcional: pôr a poção escolhida em 1º na fila do "Usar Poções", para ela ser gasta primeiro.
 - **Automações do jogo:** ligada, a recompra marca nas Automações do jogo o que ela compra: "Usar Poções", "Usar
   Revive" (com o revive dela entre os escolhidos) e, com VIP (o jogo só lança sozinho para VIP), "Lançar sem parar"
   com a pokebola dela em 1º. Desmarcou no jogo com a recompra ligada: ela marca de novo.
-- **Ouro mínimo:** nunca compra a ponto de o ouro ficar abaixo dele. Se o ouro não der para tudo, compra
-  primeiro poção, depois revive, depois pokebola.
-- Até 9.999 por compra, uma compra a cada 4 s, pelo mesmo pedido do botão Comprar do jogo. Se o jogo recusar,
+- **Ouro mínimo:** nunca compra a ponto de o ouro ficar abaixo dele. Sem ouro para o lote inteiro, espera juntar
+  (não compra aos poucos); a exceção é poção ou revive zerado, que compra o que o ouro deixar. Se o ouro não der
+  para tudo, primeiro poção, depois revive, depois pokebola.
+- O jogo aceita até 9.999 por pedido: um lote maior sai em pedidos seguidos, um a cada 4 s, pelo mesmo pedido do
+  botão Comprar do jogo. Se o jogo recusar,
   espera 30 s; 3 compras seguidas sem resposta dão 2 min de pausa.
 - Cada conta tem a sua configuração. A janela mostra o estoque, o ouro e o registro das compras; o carrinho
   do cabeçalho fica verde quando está ligada e com o jogo conectado.
@@ -267,7 +273,7 @@ levar o deck para outro PC, copie essa pasta inteira (com o deck fechado) ou ent
   Marque em Lives só a conta vinculada.
 - **Kick:** os pontos só contam com o vídeo tocando; o deck confere e recarrega, mas acompanhe o ▶ na barra de
   baixo.
-- **Recompra gasta ouro de verdade.** Confira "Manter", "Recomprar abaixo de" e o ouro mínimo antes de ligar, e
+- **Recompra gasta ouro de verdade.** Confira "Comprar", "quando tiver menos de" e o ouro mínimo antes de ligar, e
   comece por uma conta só, olhando o registro. Ela só compra com a conta ligada no deck e dentro do jogo.
 - **Login com o Google** pode não funcionar dentro do deck (o Google bloqueia alguns navegadores embutidos).
   Entre com e-mail e senha.

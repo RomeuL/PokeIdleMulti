@@ -9,6 +9,8 @@ internal sealed class RestockWindow : Form
 {
     private const int W = 720, Pad = 14, Gap = 12, Half = (W - 2 * Pad - Gap) / 2, Full = W - 2 * Pad;
     private const int LogHeight = 110;
+    private const string BuyText = "Comprar", BelowText = "quando tiver menos de";
+    private const string QtyTip = "Quanto comprar de uma vez quando o estoque cai abaixo do limite (uma compra, não aos poucos).";
 
     private readonly RestockConfig _config;
     private readonly UiSwitch _on = new("Recompra ligada") { Font = Ui.Bold };
@@ -16,17 +18,17 @@ internal sealed class RestockWindow : Form
     private string _stateText = "";
     private readonly UiSwitch _ballsOn = CardSwitch("Pokébola");
     private readonly UiSelect _ball = new();
-    private readonly UiStepper _ballKeep = Stock();
+    private readonly UiStepper _ballQty = Stock();
     private readonly UiStepper _ballBelow = Stock();
     private readonly Label _ballInfo = Corner();
     private readonly UiSwitch _revivesOn = CardSwitch("Revives");
-    private readonly UiStepper _reviveKeep = Stock();
+    private readonly UiStepper _reviveQty = Stock();
     private readonly UiStepper _reviveBelow = Stock();
     private readonly Label _reviveInfo = Corner();
     private readonly Label _reviveBuy = Ui.Label("sempre o mais barato", muted: true);
     private readonly UiSwitch _potionsOn = CardSwitch("Poções");
     private readonly UiSelect _potion = new();
-    private readonly UiStepper _potionKeep = Stock();
+    private readonly UiStepper _potionQty = Stock();
     private readonly UiStepper _potionBelow = Stock();
     private readonly UiSwitch _potionFirst = new("Pôr a poção escolhida em 1º na fila da automação \"Usar Poções\"");
     private readonly Label _potionHave = Corner();
@@ -61,16 +63,19 @@ internal sealed class RestockWindow : Form
         Put(this, _state, _on.Right + 12, Pad + 5);
         var about = new UiInfo();
         Put(this, about, W - Pad - about.Width, Pad + 8);
-        _tips.SetToolTip(about, "Compra no Market do NPC, até 9.999 por vez, uma compra a cada 4 s, com a conta ligada no deck. Se o " +
-                                "ouro não der para tudo: poções, depois revives, depois a pokebola. A Golden Potion fica de fora. " +
-                                "Vale na hora, sem botão de salvar.");
+        _tips.SetToolTip(about, "Quando o estoque fica abaixo de \"quando tiver menos de\", compra o lote de \"Comprar\" no Market do NPC, " +
+                                "uma vez, e só volta a comprar quando cair abaixo de novo. Ex.: comprar 30.000 quando tiver menos de " +
+                                "5.000 fica com uns 35.000. O jogo aceita até 9.999 por pedido: um lote maior sai em pedidos seguidos, " +
+                                "um a cada 4 s. Sem ouro para o lote inteiro, espera juntar; poção ou revive zerado compra o que o " +
+                                "ouro deixar. Se o ouro não der para tudo: poções, depois revives, depois a pokebola. Comece com " +
+                                "pouco e aumente conforme o ouro. Vale na hora, sem botão de salvar.");
 
         // Pokébola e Revives lado a lado.
         int y = Pad + 42;
         var balls = Card(Pad, y, Half, 158);
         CardHead(balls, _ballsOn, _ballInfo);
         Put(balls, _ball, 12, 46, Half - 24);
-        StockRows(balls, Half, "Manter", _ballKeep, "Recomprar abaixo de", _ballBelow);
+        StockRows(balls, Half, _ballQty, _ballBelow);
         var revives = Card(Pad + Half + Gap, y, Half, 158);
         CardHead(revives, _revivesOn, _reviveInfo);
         _reviveBuy.AutoSize = false;
@@ -78,21 +83,24 @@ internal sealed class RestockWindow : Form
         _reviveBuy.AutoEllipsis = true;
         Put(revives, _reviveBuy, 12, 46, Half - 24);
         _reviveBuy.Height = 28;
-        StockRows(revives, Half, "Manter", _reviveKeep, "Recomprar abaixo de", _reviveBelow);
-        _tips.SetToolTip(_reviveKeep, "Conta todos os revives juntos.");
+        StockRows(revives, Half, _reviveQty, _reviveBelow);
+        _tips.SetToolTip(_reviveBelow, "Conta todos os revives juntos.");
 
         // Poções na largura toda.
         y += 158 + Gap;
         var potions = Card(Pad, y, Full, 192);
         CardHead(potions, _potionsOn, _potionHave);
         Put(potions, _potion, 12, 46, 420);
-        var keep = Ui.Label("Manter", muted: true);
-        Put(potions, keep, 12, 88);
-        Put(potions, _potionKeep, 70, 82, 150);
-        var below = Ui.Label("Recomprar abaixo de", muted: true);
-        Put(potions, below, 240, 88);
-        Put(potions, _potionBelow, 370, 82, 150);
-        _tips.SetToolTip(_potionKeep, "Conta todas as poções juntas.");
+        var buy = Ui.Label(BuyText, muted: true);
+        Put(potions, buy, 12, 88);
+        Put(potions, _potionQty, buy.Right + 10, 82, 150);
+        var below = Ui.Label(BelowText, muted: true);
+        Put(potions, below, _potionQty.Right + 24, 88);
+        Put(potions, _potionBelow, below.Right + 10, 82, 150);
+        _tips.SetToolTip(_potionBelow, "Conta todas as poções juntas (a Golden Potion também).");
+        _tips.SetToolTip(_potionQty, QtyTip);
+        _tips.SetToolTip(_ballQty, QtyTip);
+        _tips.SetToolTip(_reviveQty, QtyTip);
         Put(potions, _potionFirst, 12, 120);
         Put(potions, _potionInfo, 12, 150, Full - 24);
         _potionInfo.Height = 32;
@@ -126,13 +134,13 @@ internal sealed class RestockWindow : Form
         _loading = true;
         _on.Checked = config.On;
         _ballsOn.Checked = config.Balls.On;
-        _ballKeep.Value = config.Balls.Keep;
+        _ballQty.Value = config.Balls.Buy;
         _ballBelow.Value = config.Balls.Below;
         _revivesOn.Checked = config.Revives.On;
-        _reviveKeep.Value = config.Revives.Keep;
+        _reviveQty.Value = config.Revives.Buy;
         _reviveBelow.Value = config.Revives.Below;
         _potionsOn.Checked = config.Potions.On;
-        _potionKeep.Value = config.Potions.Keep;
+        _potionQty.Value = config.Potions.Buy;
         _potionBelow.Value = config.Potions.Below;
         _potionFirst.Checked = config.PotionFirst;
         _goldFloor.Value = Math.Min(config.GoldFloor, _goldFloor.Maximum);
@@ -141,7 +149,7 @@ internal sealed class RestockWindow : Form
 
         foreach (var box in new[] { _on, _ballsOn, _revivesOn, _potionsOn, _potionFirst })
             box.CheckedChanged += (_, _) => Apply();
-        foreach (var number in new[] { _ballKeep, _ballBelow, _reviveKeep, _reviveBelow, _potionKeep, _potionBelow, _goldFloor })
+        foreach (var number in new[] { _ballQty, _ballBelow, _reviveQty, _reviveBelow, _potionQty, _potionBelow, _goldFloor })
             number.ValueChanged += (_, _) => Apply();
         _ball.SelectedIndexChanged += (_, _) => Apply();
         _potion.SelectedIndexChanged += (_, _) => Apply();
@@ -160,12 +168,12 @@ internal sealed class RestockWindow : Form
     /// <summary>O mesmo que clicar em "Recompra ligada".</summary>
     public void SetOn(bool on) => _on.Checked = on;
 
-    /// <summary>Como digitar no "Manter" da pokebola: o valor lido e o texto que fica no campo (para o autoteste).</summary>
-    public (decimal Value, string Text) TypeBallKeep(string text)
+    /// <summary>Como digitar no "Comprar" da pokebola: o valor lido e o texto que fica no campo (para o autoteste).</summary>
+    public (decimal Value, string Text) TypeBallQty(string text)
     {
-        _ballKeep.Text = text;
-        var value = _ballKeep.Value;
-        return (value, _ballKeep.Text);
+        _ballQty.Text = text;
+        var value = _ballQty.Value;
+        return (value, _ballQty.Text);
     }
 
     /// <summary>O estoque, as listas (com os nomes e preços do jogo) e o registro que a página contou.</summary>
@@ -186,8 +194,11 @@ internal sealed class RestockWindow : Form
         var balls = status?.Balls is { Count: > 0 } live ? live : Restock.KnownBalls.ToList();
         Fill(_ball, balls.Select(b => new Choice(b.Id, b.Price > 0 ? $"{b.Name} · {Restock.N(b.Price)} ouro" : b.Name ?? $"bola {b.Id}")),
             _config.Balls.Id);
-        var potions = status?.Potions is { Count: > 0 } livePotions ? livePotions : Restock.KnownPotions.ToList();
-        Fill(_potion, potions.Select(p => new Choice(p.Id, $"{p.Name} · {Restock.N(p.Price)} ouro · {Restock.N(p.Heal)} HP"))
+        var potions = status?.Potions is { Count: > 0 } livePotions ? livePotions.ToList() : Restock.KnownPotions.ToList();
+        // A Golden Potion sempre na lista; fora da lista do NPC agora, aparece sem preço (e não compra).
+        if (potions.All(p => p.Id != Restock.GoldenPotion))
+            potions.Add(Restock.KnownPotions.First(p => p.Id == Restock.GoldenPotion) with { Name = "Golden Potion (fora do NPC agora)" });
+        Fill(_potion, potions.Select(p => new Choice(p.Id, Restock.PotionText(p)))
             .Prepend(new Choice(0, "Melhor custo-benefício (automático)")), _config.Potions.Id);
 
         if (!connected)
@@ -261,14 +272,14 @@ internal sealed class RestockWindow : Form
         _config.On = _on.Checked;
         _config.Balls.On = _ballsOn.Checked;
         _config.Balls.Id = (_ball.SelectedItem as Choice)?.Id ?? _config.Balls.Id;
-        _config.Balls.Keep = (long)_ballKeep.Value;
+        _config.Balls.Buy = (long)_ballQty.Value;
         _config.Balls.Below = (long)_ballBelow.Value;
         _config.Revives.On = _revivesOn.Checked;
-        _config.Revives.Keep = (long)_reviveKeep.Value;
+        _config.Revives.Buy = (long)_reviveQty.Value;
         _config.Revives.Below = (long)_reviveBelow.Value;
         _config.Potions.On = _potionsOn.Checked;
         _config.Potions.Id = (_potion.SelectedItem as Choice)?.Id ?? _config.Potions.Id;
-        _config.Potions.Keep = (long)_potionKeep.Value;
+        _config.Potions.Buy = (long)_potionQty.Value;
         _config.Potions.Below = (long)_potionBelow.Value;
         _config.PotionFirst = _potionFirst.Checked;
         _config.GoldFloor = (long)_goldFloor.Value;
@@ -312,11 +323,11 @@ internal sealed class RestockWindow : Form
         corner.Height = 24;
     }
 
-    private static void StockRows(Control card, int width, string keepText, UiStepper keep, string belowText, UiStepper below)
+    private static void StockRows(Control card, int width, UiStepper qty, UiStepper below)
     {
-        Put(card, Ui.Label(keepText, muted: true), 12, 88);
-        Put(card, keep, width - 12 - 150, 82, 150);
-        Put(card, Ui.Label(belowText, muted: true), 12, 124);
+        Put(card, Ui.Label(BuyText, muted: true), 12, 88);
+        Put(card, qty, width - 12 - 150, 82, 150);
+        Put(card, Ui.Label(BelowText, muted: true), 12, 124);
         Put(card, below, width - 12 - 150, 118, 150);
     }
 

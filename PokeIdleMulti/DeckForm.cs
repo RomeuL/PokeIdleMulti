@@ -3630,9 +3630,11 @@ internal sealed class DeckForm : Form
 
             // Recompra: o script do deck pega o socket que o jogo abre para o próprio site. No jogo-teste ele não
             // conecta, então o socket finge estar aberto, guarda o que seria mandado e recebe o welcome à mão.
-            // Ligada na conta 1 (Ultimate Potion; o resto, os valores de fábrica), ela arruma a fila do "Usar Poções",
-            // liga o "Usar Revive" nas Automações do jogo e compra o que falta, uma compra por vez; a conta 2, desligada,
-            // não compra nada. De fábrica a poção é a de melhor custo-benefício (e a recompra nunca configurada passa para ela).
+            // Ligada na conta 1 (Ultimate Potion 4.000 abaixo de 2.000, revive 450 abaixo de 100, Ultra Ball 12.000
+            // abaixo de 5.000), ela arruma a fila do "Usar Poções", liga o "Usar Revive" nas Automações do jogo e compra
+            // um lote de cada, uma compra por vez (o lote de 12.000 em 9.999 + 2.001); com o lote comprado, o estoque
+            // gasto um pouco não compra de novo. Sem ouro para o lote, espera; poção zerada compra o que o ouro deixa.
+            // A conta 2, desligada, não compra nada. A Golden Potion entra na lista e conta com as poções.
             const string FakeSocket = """
                 (() => {
                   const ws = new WebSocket('wss://deck.test/');
@@ -3643,7 +3645,7 @@ internal sealed class DeckForm : Form
                   window.__msg({ t: 'welcome',
                     catalogoBolas: [{ id: 1, nome: 'Poke Ball', priceGold: 20, compravel: true }, { id: 4, nome: 'Ultra Ball', priceGold: 300, compravel: true }],
                     itensNossos: [{ id: 70070, name: 'Golden Potion', category: 'heal', npcPrice: 5000, healPct: 0.5 }],
-                    estado: { cheio: true, nick: 'teste', gold: 50000000, balls: { 4: 4000 }, items: { 204: 1000, 205: 50, 70070: 9999 },
+                    estado: { cheio: true, nick: 'teste', gold: 50000000, balls: { 4: 4000 }, items: { 204: 1000, 205: 50, 70070: 500 },
                       activeId: 7, automation: { autoPotion: true, potionIds: [200, 204], hpLimiar: 0.3 }, pokemons: [{ id: 7, maxHp: 2000 }] } });
                   return 1;
                 })()
@@ -3653,21 +3655,60 @@ internal sealed class DeckForm : Form
             async Task<string> Sent(AccountPane pane) => JsonSerializer.Deserialize<string>(await Eval(pane, SentScript)) ?? "";
             await Eval(_panes[0], FakeSocket);
             await Eval(_panes[1], FakeSocket);
-            bool potionDefault = new RestockConfig().Potions.Id == 0
-                && new RestockConfig { Potions = new() { On = true, Id = Restock.UltimatePotion, Keep = 5000, Below = 2000 } }.Normalized().Potions.Id == 0
-                && new RestockConfig { On = true, Potions = new() { On = true, Id = Restock.UltimatePotion, Keep = 5000, Below = 2000 } }.Normalized().Potions.Id == Restock.UltimatePotion;
-            _config.Restock[0].Potions.Id = Restock.UltimatePotion;
-            _config.Restock[0].On = true;
+            // De fábrica: pouco (para quem está começando) e a poção de melhor custo-benefício. O deck.json de antes
+            // ("manter"): nunca configurada fica com os de agora; configurada compra o que levava ao "manter".
+            var oldUntouched = new RestockConfig
+            {
+                Balls = new() { On = true, Id = 4, Keep = 30000, Below = 5000 }, Revives = new() { On = true, Keep = 500, Below = 100 },
+                Potions = new() { On = true, Id = Restock.UltimatePotion, Keep = 5000, Below = 2000 }, GoldFloor = 1_000_000,
+            }.Normalized();
+            var oldUsed = new RestockConfig
+            {
+                On = true, Balls = new() { On = true, Id = 4, Keep = 30000, Below = 5000 },
+                Potions = new() { On = true, Id = Restock.UltimatePotion, Keep = 5000, Below = 2000 }, GoldFloor = 1_000_000,
+            }.Normalized();
+            var fresh = new RestockConfig();
+            bool potionDefault = fresh.Potions is { Id: 0, Buy: 100, Below: 30 } && fresh.Balls is { Id: 1, Buy: 500, Below: 100 }
+                && fresh.Revives is { Buy: 10, Below: 3 } && fresh.GoldFloor == 10_000
+                && oldUntouched.Balls is { Id: 1, Buy: 500, Below: 100, Keep: null } && oldUntouched.Potions is { Id: 0, Buy: 100 }
+                && oldUntouched.Revives.Buy == 10 && oldUntouched.GoldFloor == 10_000
+                && oldUsed.Balls is { Id: 4, Buy: 25000, Below: 5000, Keep: null } && oldUsed.Potions is { Id: Restock.UltimatePotion, Buy: 3000 }
+                && oldUsed.GoldFloor == 1_000_000 && !JsonSerializer.Serialize(oldUsed).Contains("Keep");
+            var restock0 = _config.Restock[0];
+            restock0.Potions = new() { On = true, Id = Restock.UltimatePotion, Buy = 4000, Below = 2000 };
+            restock0.Revives = new() { On = true, Buy = 450, Below = 100 };
+            restock0.Balls = new() { On = true, Id = 4, Buy = 12000, Below = 5000 };
+            restock0.GoldFloor = 1_000_000;
+            restock0.On = true;
             await ApplyRestockAsync(0);
             await Task.Delay(2500);
             var firstBuy = await Sent(_panes[0]);
-            // O jogo confirma (o aviso da compra e o estoque novo): 4 s depois vêm os revives, depois as Ultra Balls.
+            var goldenListed = await Eval(_panes[0], "window.__deckRecompra.summary().potions.some(p => p.id === 70070 && p.healPct === 0.5)");
+            // O jogo confirma (o aviso da compra, o estoque novo e as Automações como ela pediu): 4 s depois vêm os
+            // revives, depois as Ultra Balls.
             await Eval(_panes[0], "__msg({ t: 'batalha', ev: [{ k: 'compra', nome: 'Ultimate Potion', qtd: 4000, gasto: 6000000 }] });" +
-                                  " __msg({ t: 'estado', estado: { gold: 44000000, items: { 204: 5000, 205: 50 } } }); 1");
+                                  " __msg({ t: 'estado', estado: { gold: 44000000, items: { 204: 5000, 205: 50, 70070: 500 }," +
+                                  " automation: { autoPotion: true, autoRevive: true, potionIds: [204, 200], hpLimiar: 0.3 } } }); 1");
             await Task.Delay(4500);
-            await Eval(_panes[0], "__msg({ t: 'estado', estado: { items: { 204: 5000, 205: 500 } } }); 1");
+            await Eval(_panes[0], "__msg({ t: 'estado', estado: { items: { 204: 5000, 205: 500, 70070: 500 } } }); 1");
+            await Task.Delay(4500);
+            // A 1ª parte das Ultra Balls chega (e o jogo já gastou umas): vem o resto do lote, e só.
+            await Eval(_panes[0], "__msg({ t: 'batalha', ev: [{ k: 'compra', nome: 'Ultra Ball', qtd: 9999, gasto: 2999700 }] });" +
+                                  " __msg({ t: 'estado', estado: { gold: 40000000, balls: { 4: 13990 } } }); 1");
+            await Task.Delay(4500);
+            await Eval(_panes[0], "__msg({ t: 'batalha', ev: [{ k: 'compra', nome: 'Ultra Ball', qtd: 2001, gasto: 600300 }] });" +
+                                  " __msg({ t: 'estado', estado: { balls: { 4: 15980 } } }); 1");
             await Task.Delay(4500);
             var allBuys = await Sent(_panes[0]);
+            // Ouro para 200 mil acima do mínimo: as Ultra Balls abaixo de 5.000 esperam (o lote custa 3,6 mi); as poções
+            // zeradas compram o que o ouro deixa (200.000 / 1.500 = 133).
+            await Eval(_panes[0], "__msg({ t: 'estado', estado: { gold: 1200000, balls: { 4: 100 } } }); 1");
+            await Task.Delay(2000);
+            var waitedGold = await Sent(_panes[0]);
+            await Eval(_panes[0], "__msg({ t: 'estado', estado: { items: { 204: 0, 205: 500, 70070: 0 } } }); 1");
+            await Task.Delay(4500);
+            var rescueBuys = await Sent(_panes[0]);
+            var restockLog = await Eval(_panes[0], "window.__deckRecompra.summary().log.join('\\n')");
             var notBought = await Sent(_panes[1]);
             await RefreshRestockAsync(0);
             await RefreshRestockAsync(1);
@@ -3682,10 +3723,15 @@ internal sealed class DeckForm : Form
             string autoVip = "";
             for (int tries = 0; tries < 20 && !(autoVip = await AutoSets()).Contains("4,1"); tries++)
                 await Task.Delay(200);
-            Check("recompra: arruma a fila das poções e compra poção, revive e pokebola, uma por vez (desligada não compra)",
-                firstBuy == "[\"fila:204,200\",\"item:204x4000\"]" && allBuys == "[\"fila:204,200\",\"item:204x4000\",\"item:205x450\",\"ball:4x9999\"]"
+            const string LotBuys = "\"fila:204,200\",\"item:204x4000\",\"item:205x450\",\"ball:4x9999\",\"ball:4x2001\"";
+            Check("recompra: arruma a fila das poções e compra um lote de poção, revive e pokebola, uma por vez (desligada não compra)",
+                firstBuy == "[\"fila:204,200\",\"item:204x4000\"]" && allBuys == $"[{LotBuys}]"
                 && notBought == "[]" && _panes[0].RestockState == "ligada" && _panes[1].RestockState == "desligada",
                 $"conta1={allBuys} (1ª={firstBuy}) conta2={notBought} carrinhos={_panes[0].RestockState},{_panes[1].RestockState}");
+            Check("recompra: sem ouro para o lote espera (sem comprar aos poucos); poção zerada compra o que o ouro deixa; Golden Potion na lista",
+                waitedGold == $"[{LotBuys}]" && rescueBuys == $"[{LotBuys},\"item:204x133\"]" && restockLog.Contains("esperando")
+                && goldenListed == "true",
+                $"esperando={waitedGold} zerada={rescueBuys} golden={goldenListed} registro={restockLog.Replace("\\n", " | ")}");
             Check("recompra: liga nas Automações do jogo o que compra (revive; com VIP, lançar sem parar com a bola dela em 1º); poção de fábrica = custo-benefício",
                 potionDefault && autoNoVip == "[\"204,200/true/true///\"]"
                 && autoVip == "[\"204,200/true/true///\",\"204,200/true/true/true/false/4,1\"]",
@@ -3703,11 +3749,11 @@ internal sealed class DeckForm : Form
                 restockWindow.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
                 bitmap.Save(picture);
             }
-            var typed = restockWindow.TypeBallKeep("12.345");
-            var typedComma = restockWindow.TypeBallKeep("30,000");
+            var typed = restockWindow.TypeBallQty("12.345");
+            var typedComma = restockWindow.TypeBallQty("30,000");
             Check("recompra: campo de quantidade aceita 12.345 e 30,000 e escreve como o registro",
-                typed == (12345m, "12.345") && typedComma == (30000m, "30.000") && _config.Restock[0].Balls.Keep == 30000,
-                $"12.345 → {typed} · 30,000 → {typedComma} · config={_config.Restock[0].Balls.Keep}");
+                typed == (12345m, "12.345") && typedComma == (30000m, "30.000") && _config.Restock[0].Balls.Buy == 30000,
+                $"12.345 → {typed} · 30,000 → {typedComma} · config={_config.Restock[0].Balls.Buy}");
             restockWindow.SetOn(false);
             await Task.Delay(500);
             var pageOff = await Eval(_panes[0], "window.__deckRecompra.summary().on");

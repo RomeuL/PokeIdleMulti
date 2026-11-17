@@ -1,60 +1,86 @@
 using System.Globalization;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace PokeIdleMulti;
 
 /// <summary>
-/// Recompra de uma conta: a pokebola escolhida, os revives e as poções. Abaixo de "recomprar abaixo de", o
-/// script da página (recompra.js) compra no Market do NPC até "manter", sem deixar o ouro abaixo do mínimo.
+/// Recompra de uma conta: a pokebola escolhida, os revives e as poções. Quando o estoque fica abaixo de "quando
+/// tiver menos de", o script da página (recompra.js) compra o lote de "Comprar" no Market do NPC, uma vez, sem deixar
+/// o ouro abaixo do mínimo. Os valores de fábrica são pequenos, para quem está começando: aumenta conforme o ouro.
 /// </summary>
 internal sealed class RestockConfig
 {
     public bool On { get; set; }
 
-    /// <summary>A pokebola (Id do catálogo do jogo; 4 é a Ultra Ball).</summary>
-    public RestockRule Balls { get; set; } = new() { On = true, Id = 4, Keep = 30000, Below = 5000 };
+    /// <summary>A pokebola (Id do catálogo do jogo; 1 é a Poke Ball, 4 a Ultra Ball).</summary>
+    public RestockRule Balls { get; set; } = new() { On = true, Id = 1, Buy = 500, Below = 100 };
 
     /// <summary>Os revives, contados juntos; compra sempre o mais barato.</summary>
-    public RestockRule Revives { get; set; } = new() { On = true, Keep = 500, Below = 100 };
+    public RestockRule Revives { get; set; } = new() { On = true, Buy = 10, Below = 3 };
 
     /// <summary>
-    /// As poções, contadas juntas; Id 0 (de fábrica desde 14/11) é o melhor custo-benefício no pokemon ativo, 204 a
+    /// As poções, contadas juntas (a Golden Potion também); Id 0 é o melhor custo-benefício no pokemon ativo, 204 a
     /// Ultimate Potion.
     /// </summary>
-    public RestockRule Potions { get; set; } = new() { On = true, Id = 0, Keep = 5000, Below = 2000 };
+    public RestockRule Potions { get; set; } = new() { On = true, Id = 0, Buy = 100, Below = 30 };
 
     /// <summary>Pôr a poção escolhida em 1º na fila da automação "Usar Poções" (a ordem dela é a ordem de gasto).</summary>
     public bool PotionFirst { get; set; } = true;
 
     /// <summary>Nunca comprar a ponto de o ouro ficar abaixo disto.</summary>
-    public long GoldFloor { get; set; } = 1_000_000;
+    public long GoldFloor { get; set; } = 10_000;
 
-    /// <summary>Um deck.json editado à mão (ou de uma versão sem a recompra) não pode deixar regra vazia.</summary>
+    /// <summary>
+    /// Um deck.json editado à mão (ou de uma versão sem a recompra) não pode deixar regra vazia. O de antes de 17/11
+    /// ("manter" em vez de "comprar") passa para o lote: a recompra nunca configurada (desligada, com os valores de
+    /// fábrica de antes) fica com os de agora; a configurada compra o que levava ao "manter" (manter − abaixo de).
+    /// </summary>
     public RestockConfig Normalized()
     {
         var fresh = new RestockConfig();
         Balls ??= fresh.Balls;
         Revives ??= fresh.Revives;
         Potions ??= fresh.Potions;
-        // A recompra nunca configurada (desligada, com a poção de fábrica de antes, a Ultimate) passa para o custo-benefício.
-        if (!On && Potions is { On: true, Id: Restock.UltimatePotion, Keep: 5000, Below: 2000 })
-            Potions.Id = 0;
+        if (!On && Balls is { Id: 4, Keep: 30000, Below: 5000 })
+        {
+            Balls = Reset(Balls, fresh.Balls);
+            if (GoldFloor == 1_000_000)
+                GoldFloor = fresh.GoldFloor;
+        }
+        if (!On && Revives is { Keep: 500, Below: 100 })
+            Revives = Reset(Revives, fresh.Revives);
+        if (!On && Potions is { Id: 0 or Restock.UltimatePotion, Keep: 5000, Below: 2000 })
+            Potions = Reset(Potions, fresh.Potions);
         foreach (var rule in new[] { Balls, Revives, Potions })
         {
-            rule.Keep = Math.Clamp(rule.Keep, 0, Restock.MaxStock);
+            if (rule.Keep is long keep)
+                rule.Buy = keep > rule.Below ? keep - rule.Below : rule.Below;
+            rule.Keep = null;
+            rule.Buy = Math.Clamp(rule.Buy, 0, Restock.MaxStock);
             rule.Below = Math.Clamp(rule.Below, 0, Restock.MaxStock);
         }
         GoldFloor = Math.Max(0, GoldFloor);
         return this;
     }
+
+    /// <summary>Os valores de fábrica de agora, mantendo o liga/desliga da regra.</summary>
+    private static RestockRule Reset(RestockRule old, RestockRule fresh) => new() { On = old.On, Id = fresh.Id, Buy = fresh.Buy, Below = fresh.Below };
 }
 
 internal sealed class RestockRule
 {
     public bool On { get; set; }
     public int Id { get; set; }
-    public long Keep { get; set; }
+
+    /// <summary>Quanto comprar de uma vez (o lote), quando o estoque fica abaixo de <see cref="Below"/>.</summary>
+    public long Buy { get; set; }
+
     public long Below { get; set; }
+
+    /// <summary>O "manter" do deck.json de antes de 17/11: só lido (o <see cref="RestockConfig.Normalized"/> passa para o lote).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public long? Keep { get; set; }
 }
 
 /// <summary>O que a página conta: estoque, ouro, a poção escolhida e o registro das compras.</summary>
@@ -67,12 +93,18 @@ internal sealed record RestockStatus(
     public double PotionHave => Potions?.Sum(p => p.Have) ?? 0;
 }
 
-/// <summary>Uma bola, poção ou revive do balcão; <see cref="Cost"/> é o ouro por HP útil (só nas poções).</summary>
-internal sealed record RestockOffer(int Id, string? Name, double Price, double Have, double Heal, double? Cost);
+/// <summary>
+/// Uma bola, poção ou revive do balcão; <see cref="Cost"/> é o ouro por HP útil (só nas poções), <see cref="HealPct"/>
+/// a fração do HP que ela cura (só a Golden Potion).
+/// </summary>
+internal sealed record RestockOffer(int Id, string? Name, double Price, double Have, double Heal, double? Cost, double HealPct = 0);
 
 internal static class Restock
 {
     public const int UltimatePotion = 204;
+
+    /// <summary>A única poção que cura por % do HP (vem nos itens do próprio jogo, fora do espelho).</summary>
+    public const int GoldenPotion = 70070;
 
     /// <summary>O teto dos campos de quantidade.</summary>
     public const long MaxStock = 10_000_000;
@@ -99,8 +131,21 @@ internal static class Restock
     {
         new(200, "Small Potion", 50, 0, 60, null), new(201, "Great Potion", 150, 0, 150, null),
         new(202, "Ultra Potion", 400, 0, 400, null), new(203, "Hyper Potion", 800, 0, 1000, null),
-        new(UltimatePotion, "Ultimate Potion", 1500, 0, 3000, null),
+        new(UltimatePotion, "Ultimate Potion", 1500, 0, 3000, null), new(GoldenPotion, "Golden Potion", 0, 0, 0, null),
     };
+
+    /// <summary>Uma poção na lista: "Ultimate Potion · 1.500 ouro · 3.000 HP", "Golden Potion · 5.000 ouro · 50% do HP".</summary>
+    public static string PotionText(RestockOffer p)
+    {
+        var parts = new List<string> { p.Name ?? $"item {p.Id}" };
+        if (p.Price > 0)
+            parts.Add($"{N(p.Price)} ouro");
+        if (p.HealPct > 0)
+            parts.Add($"{p.HealPct * 100:0}% do HP");
+        else if (p.Heal > 0)
+            parts.Add($"{N(p.Heal)} HP");
+        return string.Join(" · ", parts);
+    }
 
     public static string ConfigureScript(RestockConfig config) =>
         $"window.__deckRecompra ? window.__deckRecompra.configure({JsonSerializer.Serialize(config, Json)}) : false";

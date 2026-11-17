@@ -1,5 +1,6 @@
-// A recompra do deck: confere o estoque da conta (a pokebola escolhida, os revives e as poções) e compra
-// no Market do NPC o que ficou abaixo do pedido, pelo mesmo pedido do botão Comprar do jogo (`shop.buy`).
+// A recompra do deck: confere o estoque da conta (a pokebola escolhida, os revives e as poções) e, quando um
+// fica abaixo do limite, compra o lote dele no Market do NPC, uma vez, pelo mesmo pedido do botão Comprar do
+// jogo (`shop.buy`). Depois só volta a comprar quando o estoque cair abaixo do limite de novo.
 //
 // O jogo guarda o estado da conta dentro do módulo dele, fora do alcance da página. Então este script
 // acompanha o mesmo socket: pega o socket do jogo quando ele nasce, lê o `welcome` (o quadro inteiro) e
@@ -11,7 +12,8 @@
   const GAP = 4000; // uma compra a cada 4 s
   const MAX_QTY = 9999; // o teto do jogo por pedido (`maxCompraPorOuro`)
   const TIMEOUT = 15000; // compra sem resposta do jogo depois disso conta como falha
-  const GOLDEN_POTION = 70070; // a única que cura por % do HP: fica de fora (nem conta, nem compra)
+  const WAIT = 'esperando ouro'; // o tipo esperando juntar ouro para o lote (os de depois esperam junto)
+  const NAMES = { potions: 'as poções', revives: 'os revives', balls: 'a pokebola' };
   const KEYS = ['gold', 'balls', 'items', 'automation', 'activeId', 'nick', 'loja'];
   const WANTED = new Set(['welcome', 'estado', 'batalha', 'erro']);
 
@@ -31,7 +33,7 @@
   let pauseUntil = 0;
   let failures = 0;
   let lastAuto = { sig: '', at: 0 }; // o último pedido às Automações do jogo
-  const filling = { balls: false, revives: false, potions: false };
+  const lots = { balls: null, revives: null, potions: null }; // o lote em andamento de cada tipo: { item, left }
 
   const fmt = (n) => Math.round(n).toLocaleString('pt-BR');
   const note = (text) => {
@@ -118,11 +120,11 @@
       .catch(() => noteOnce('itens', 'não consegui ler a lista de itens do jogo; tento de novo em 30 s'));
   }
 
-  /** As poções (heal) ou os revives que o NPC vende, do mais barato ao mais caro. */
+  /** As poções (heal, com a Golden Potion) ou os revives que o NPC vende, do mais barato ao mais caro. */
   function shop(category) {
     const items = new Map();
     for (const i of [...(mirror ?? []), ...ours]) {
-      if (i?.category !== category || !(i.npcPrice > 0) || i.id === GOLDEN_POTION) continue;
+      if (i?.category !== category || !(i.npcPrice > 0)) continue;
       items.set(i.id, {
         id: i.id, name: i.name, price: paid.get(i.id) ?? i.npcPrice,
         heal: Number(i.healAmount) || 0, healPct: Number(i.healPct) || 0,
@@ -157,28 +159,52 @@
     return potions.filter((p) => p.cost < Infinity).sort((a, b) => a.cost - b.cost || b.useful - a.useful)[0] ?? null;
   }
 
-  /** O que comprar de um tipo: abaixo de `below` começa, e compra até `keep` (em várias compras, se for o caso). */
-  function plan(kind, rule, count, item) {
-    if (!rule?.on) {
-      filling[kind] = false;
+  /** Quanto tem do item que vai comprar (a bola escolhida, ou a poção/revive daquele pedido). */
+  const stock = (kind, item) => kind === 'balls' ? Number(account.balls?.[item.id]) || 0 : have(item);
+
+  /**
+   * O que comprar de um tipo. Abaixo de `below`, começa um lote de `buy`, uma vez (o jogo aceita até 9.999 por
+   * pedido: um lote maior sai em pedidos seguidos); com o lote comprado, só volta a olhar quando cair abaixo de
+   * novo. Sem ouro para o lote inteiro, espera juntar (não compra aos poucos), e `waiting` (um tipo de antes
+   * esperando ouro) também segura este. A exceção: poção ou revive zerado compra o que o ouro deixar.
+   */
+  function plan(kind, rule, count, item, waiting) {
+    if (!rule?.on || !(rule.buy > 0)) {
+      lots[kind] = null;
       return null;
     }
-    const target = Math.max(rule.keep, rule.below);
-    if (count >= target) {
-      filling[kind] = false;
-      return null;
-    }
-    if (!filling[kind] && count >= rule.below) return null;
-    filling[kind] = true;
-    if (!item || !(item.price > 0)) return null;
     const floor = config.goldFloor || 0;
-    const qty = Math.min(MAX_QTY, target - count, Math.floor(((Number(account.gold) || 0) - floor) / item.price));
+    const spare = (Number(account.gold) || 0) - floor;
+    let lot = lots[kind];
+    if (!lot) {
+      if (count >= rule.below || !item || !(item.price > 0)) return null;
+      const need = rule.buy * item.price;
+      let qty = rule.buy;
+      if (waiting || spare < need) {
+        if (kind === 'balls' || count >= 1) {
+          noteOnce(`ouro:${kind}`, waiting
+            ? `${item.name}: abaixo de ${fmt(rule.below)}, esperando ${waiting} (o ouro vai primeiro para lá)`
+            : `${item.name}: abaixo de ${fmt(rule.below)}, esperando juntar ${fmt(floor + need)} de ouro para o lote de ${fmt(rule.buy)}`);
+          return WAIT;
+        }
+        qty = Math.min(rule.buy, Math.floor(spare / item.price));
+        if (qty < 1) {
+          noteOnce(`ouro:${kind}`, `${item.name}: acabou e o ouro está no mínimo (${fmt(floor)})`);
+          return WAIT;
+        }
+      }
+      once.delete(`ouro:${kind}`);
+      lot = lots[kind] = { item, left: qty };
+      note(`${item.name}: ${fmt(count)} na mochila, abaixo de ${fmt(rule.below)}: compra ${fmt(qty)}` +
+        (qty < rule.buy ? ` (acabou: o que o ouro deixou, de ${fmt(rule.buy)})` : ''));
+    }
+    const qty = Math.min(MAX_QTY, lot.left, Math.floor(spare / lot.item.price));
     if (qty < 1) {
-      noteOnce(`ouro:${kind}`, `${item.name}: o ouro está no mínimo (${fmt(floor)}); compra quando passar de ${fmt(floor + item.price)}`);
+      lots[kind] = null;
+      note(`${lot.item.name}: o ouro chegou no mínimo (${fmt(floor)}) no meio do lote; ficaram ${fmt(lot.left)} sem comprar`);
       return null;
     }
-    once.delete(`ouro:${kind}`);
-    return { kind, item, qty, count };
+    return { kind, item: lot.item, qty, start: stock(kind, lot.item) };
   }
 
   function tick() {
@@ -195,19 +221,29 @@
     fixAutomation(potion, potions, revives, now);
     if (pending) {
       // Sem o aviso da compra, o estoque que subiu também confirma.
-      const count = pending.kind === 'balls' ? Number(account.balls?.[pending.item.id]) || 0 : have(pending.item);
-      if (count - pending.count >= pending.qty / 2) done(`comprou ${pending.item.name} ×${fmt(pending.qty)}`);
+      if (stock(pending.kind, pending.item) - pending.start >= pending.qty / 2) done(`comprou ${pending.item.name} ×${fmt(pending.qty)}`);
       else if (now - pending.at < TIMEOUT) return;
       else failed(`${pending.item.name}: o jogo não respondeu à compra`);
     }
     if (now < nextAt || now < pauseUntil) return;
 
-    const b =ballCatalog.find((x) => x.id === config.balls?.id && x.compravel && x.priceGold > 0);
+    const b = ballCatalog.find((x) => x.id === config.balls?.id && x.compravel && x.priceGold > 0);
     const ball = b && { id: b.id, name: b.nome, price: paid.get(`bola${b.id}`) ?? b.priceGold };
     // Primeiro o que mantém o pokemon de pé, se o ouro não der para tudo.
-    const todo = plan('potions', config.potions, total(potions), potion)
-      ?? plan('revives', config.revives, total(revives), revives[0])
-      ?? plan('balls', config.balls, Number(account.balls?.[config.balls?.id]) || 0, ball);
+    let todo = null;
+    let waiting = null;
+    for (const [kind, count, item] of [
+      ['potions', total(potions), potion],
+      ['revives', total(revives), revives[0]],
+      ['balls', Number(account.balls?.[config.balls?.id]) || 0, ball],
+    ]) {
+      const step = plan(kind, config[kind], count, item, waiting);
+      if (step === WAIT) waiting ??= NAMES[kind];
+      else if (step) {
+        todo = step;
+        break;
+      }
+    }
     if (!todo) return;
     pending = { ...todo, at: now };
     nextAt = now + GAP;
@@ -277,7 +313,10 @@
   function bought(e) {
     if (!pending || Number(e.qtd) !== pending.qty) return; // compra feita na mão: o próprio jogo avisa
     const spent = Number(e.gasto);
-    if (spent > 0) paid.set(pending.kind === 'balls' ? `bola${pending.item.id}` : pending.item.id, spent / pending.qty);
+    if (spent > 0) {
+      paid.set(pending.kind === 'balls' ? `bola${pending.item.id}` : pending.item.id, spent / pending.qty);
+      pending.item.price = spent / pending.qty; // o resto do lote conta com o preço cobrado
+    }
     done(`comprou ${pending.item.name} ×${fmt(pending.qty)}${spent > 0 ? ` (−${fmt(spent)} ouro)` : ''}`);
   }
 
@@ -287,8 +326,16 @@
     nextAt = Date.now() + 30000;
   }
 
+  /** A compra no ar deu certo: desconta do lote dela (o lote acaba quando não falta nada). */
   function done(text) {
-    note(text);
+    const lot = lots[pending.kind];
+    let rest = '';
+    if (lot && lot.item === pending.item) {
+      lot.left -= pending.qty;
+      if (lot.left > 0) rest = ` (faltam ${fmt(lot.left)} do lote)`;
+      else lots[pending.kind] = null;
+    }
+    note(text + rest);
     pending = null;
     failures = 0;
   }
@@ -303,20 +350,24 @@
     }
   }
 
-  // Relido campo a campo: número que não é número vira 0 (e 0 em "manter" e "abaixo de" não compra nada).
+  // Relido campo a campo: número que não é número vira 0 (e 0 em "comprar" ou "quando tiver menos de" não compra nada).
   const rule = (r) => ({
     on: !!r?.on, id: Math.trunc(Number(r?.id) || 0),
-    keep: Math.max(0, Math.trunc(Number(r?.keep) || 0)), below: Math.max(0, Math.trunc(Number(r?.below) || 0)),
+    buy: Math.max(0, Math.trunc(Number(r?.buy) || 0)), below: Math.max(0, Math.trunc(Number(r?.below) || 0)),
   });
 
   function configure(c) {
     if (!c || typeof c !== 'object') return false;
     if (!!c.on !== !!config?.on) note(c.on ? 'recompra ligada' : 'recompra desligada');
+    const old = config;
     config = {
       on: !!c.on, balls: rule(c.balls), revives: rule(c.revives), potions: rule(c.potions),
       potionFirst: !!c.potionFirst, goldFloor: Math.max(0, Number(c.goldFloor) || 0),
     };
-    for (const kind of Object.keys(filling)) if (!config[kind].on) filling[kind] = false;
+    // A regra mudou (outra bola, outro lote): o lote em andamento dela acaba; abaixo do limite, começa um com a nova.
+    for (const kind of Object.keys(lots)) {
+      if (!config.on || JSON.stringify(config[kind]) !== JSON.stringify(old?.[kind])) lots[kind] = null;
+    }
     once.clear();
     pauseUntil = 0;
     failures = 0;
@@ -339,7 +390,7 @@
       revives: revives.map((r) => ({ id: r.id, name: r.name, price: r.price, have: have(r) })),
       potions: potions.map((p) => ({
         id: p.id, name: p.name, price: p.price, have: have(p), heal: p.healPct > 0 && fit ? Math.round(p.healPct * fit.hp) : p.heal,
-        cost: fit && Number.isFinite(p.cost) ? p.cost : null,
+        healPct: p.healPct, cost: fit && Number.isFinite(p.cost) ? p.cost : null,
       })),
       potionId: potion?.id ?? null,
       maxHp: fit?.hp ?? null,
