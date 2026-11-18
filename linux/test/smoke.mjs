@@ -79,7 +79,9 @@ async function verifyClipboard(page, browser) {
   const insecure = await browser.newPage();
   try {
     const fallbackText = 'Texto HTTP: café 🎮';
+    await page.bringToFront();
     await page.evaluate(text => navigator.clipboard.writeText(text), fallbackText);
+    await insecure.bringToFront();
     await insecure.authenticate({ username: process.env.WEB_USER || 'pokeidle', password: process.env.WEB_PASSWORD });
     await insecure.goto(`http://${address}:8080`);
     await insecure.waitForFunction(() => document.querySelector('#connection').hidden, { timeout: 15000 });
