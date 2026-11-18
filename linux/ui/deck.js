@@ -39,7 +39,7 @@ function render() {
     if (pane.dataset.signature !== signature) {
       pane.dataset.signature = signature;
     pane.querySelector('.head').innerHTML = `<span class="dot ${connected ? 'ok' : off ? '' : 'warn'}">●</span><span class="name">${esc(c.AccountNames[i])}</span><span class="info" title="${esc(p.note || p.status)}">${esc(p.note || (p.status === 'jogo' || p.status === 'app' ? '· rodando há ' + uptime(p.startedAt) : p.status))}</span><span class="controls">`
-      + (p.manualLogin ? button('login-resume', 'Retomar recursos', `data-index="${i}" class="green" title="Após entrar no jogo, reabrir o mesmo perfil com os recursos do deck"`) : ext + button('live-account', 'lives', `data-index="${i}" title="Lives da Twitch/Kick nesta conta"`)
+      + (p.manualLogin ? button('login-resume', 'Retomar recursos', `data-index="${i}" class="green" title="Após concluir o login, reabrir o mesmo perfil com os recursos do deck"`) : ext + button('live-account', 'lives', `data-index="${i}" title="Lives da Twitch/Kick nesta conta"`)
       + button('restock', '🛒', `data-index="${i}" class="${c.Restock[i].On ? 'green' : ''}" title="Recompra"`)
       + button('pvp', '⚔', `data-index="${i}" class="${c.Pvp[i] ? 'green' : ''}" title="Fila de PvP"`)
       + button('vote', '🗳', `data-index="${i}" class="${p.vote?.canVote ? 'green' : ''}" title="Votar no TopIdle"`)
@@ -154,7 +154,11 @@ async function act(action, element) {
     case 'live-next': await liveAccount((formIndex + 1) % 4); break;
     case 'save-live-account': c = cloneConfig(); c.LivesAccounts = c.LivesAccounts.filter(n => n !== formIndex + 1); if (fields().checked('enabled')) c.LivesAccounts.push(formIndex + 1); await save(c); closeDialog(); break;
     case 'live-player': await call('live.player', { index: i, site: element.dataset.site, channel: element.dataset.channel }); break;
-    case 'live-login': await call('live.login', { index: i, site: element.dataset.site }); break;
+    case 'live-login':
+      closeDialog();
+      await call('live.login', { index: i, site: element.dataset.site });
+      notice('Conclua o login e depois clique em Retomar recursos.');
+      break;
     case 'live-points': await call('live.points', { index: i, site: element.dataset.site, channel: element.dataset.channel, full: false }); break;
     case 'live-limit': c = cloneConfig(); { const site = element.dataset.site, limit = c[site][i], channel = element.dataset.channel, reopening = limit.Closed.includes(channel); limit.Closed = reopening ? limit.Closed.filter(v => v !== channel) : [...limit.Closed, channel]; const slots = Math.max(0, Math.min(c[site + 'Lives'], (limit.Slots ?? c[site + 'Lives']) + (reopening ? 1 : -1))); limit.Slots = slots === c[site + 'Lives'] ? null : slots; } await save(c); await call('lives.refresh'); await liveAccount(i); break;
     case 'extensions': await extensions(); break;

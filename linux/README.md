@@ -4,6 +4,8 @@ O deck roda no Linux e é controlado pelo navegador. Não usa Windows, Wine, má
 
 As barras, cores, grade 2×2, colunas, foco e janelas de configuração reproduzem o aplicativo original. Os controles WinForms foram portados para HTML/CSS; a fonte de fallback no Linux e os diálogos do próprio Chromium podem ter diferenças visuais em relação ao Windows. Os sites do jogo e das lives são os originais.
 
+Para entrar na Twitch ou na Kick, abra **Lives** na conta desejada e clique em **Entrar / mostrar login** no serviço. O deck abre o Chromium comum com o perfil daquela conta. Na Kick, escolha **Continuar com Google** se esse for o seu método de login. Ao concluir, clique em **Retomar recursos** para reabrir o mesmo perfil no deck. As outras contas continuam funcionando durante o login.
+
 ## Iniciar
 
 Requer Docker Engine e Docker Compose em um host Linux. A imagem é validada em `linux/amd64`. Não exige modo privilegiado nem acesso ao Docker socket. Reserve memória para as quatro instâncias do jogo; o consumo depende das contas, extensões e páginas abertas.

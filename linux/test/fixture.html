@@ -1,4 +1,6 @@
-<!doctype html><html><head><meta charset="utf-8"><title>Teste local PokeIdle</title><style>body{background:#171723;color:#e4e4ee;font:18px sans-serif;padding:24px}button,input{padding:12px;font:inherit;margin:6px}#counter{color:#2ecc71}.hidden{display:none}</style></head><body><div id="app"><h1>Conta de teste</h1><p>Esta página roda apenas nos testes locais.</p><p id="account"></p><button id="test-click">Clique compartilhado</button><span id="counter">0</span><p><input id="typing" placeholder="Digitação isolada"></p></div><script>
+<!doctype html><html><head><meta charset="utf-8"><title>Teste local PokeIdle</title><style>body{background:#171723;color:#e4e4ee;font:18px sans-serif;padding:24px}button,input{padding:12px;font:inherit;margin:6px}#counter{color:#2ecc71}.hidden{display:none}</style></head><body><div id="app"><h1>Conta de teste</h1><p>Esta página roda apenas nos testes locais.</p><p id="account"></p><button id="test-click">Clique compartilhado</button><span id="counter">0</span><p><input id="typing" placeholder="Digitação isolada"></p>
+<p><select id="collection-sort" aria-label="Ordenar coleção"><option value="recent">Recentes</option><option value="name">Nome</option></select></p>
+</div><script>
 localStorage.setItem('nick', 'Teste');
 let counter=0;document.getElementById('test-click').onclick=()=>document.getElementById('counter').textContent=String(++counter);
 document.getElementById('account').textContent=localStorage.getItem('isolation')||'Perfil novo';
@@ -6,6 +8,7 @@ const socket=new WebSocket('ws://127.0.0.1:8081/fixture-ws');
 if (!window.__deckRecompra) {
   localStorage.setItem('manual-session', 'from-manual-browser');
   document.cookie='deck_manual_session=from-manual-browser; path=/; max-age=86400';
-  socket.addEventListener('open',()=>socket.send(JSON.stringify({t:'test.manual-ready'})));
+  const login = new URLSearchParams(location.search).get('login') || 'game';
+  socket.addEventListener('open',()=>socket.send(JSON.stringify({t:'test.manual-ready', login})));
 }
 </script></body></html>

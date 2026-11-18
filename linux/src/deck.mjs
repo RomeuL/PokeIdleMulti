@@ -11,6 +11,7 @@ const safeChannel = value => /^[a-zA-Z0-9_-]{1,64}$/.test(value);
 const sites = ['Twitch', 'Kick'];
 const rewardKinds = ['xp', 'captura', 'shiny'];
 const gameURL = process.env.DECK_TEST_MODE === '1' ? 'http://127.0.0.1:8081/fixture' : 'https://pokeidle.io/app';
+const liveLoginURLs = { Twitch: 'https://www.twitch.tv/login', Kick: 'https://kick.com/login' };
 
 export class Deck extends EventEmitter {
   accounts = Array(4).fill(null);
@@ -60,9 +61,9 @@ export class Deck extends EventEmitter {
     this.config = await this.bridge.call('config.save', { config: validateConfig(config, this.config) });
     this.emitState(); return this.config;
   }
-  async startAccount(index, { waitForNavigation = true } = {}) {
+  async startAccount(index, { waitForNavigation = true, manualURL } = {}) {
     if (this.accounts[index]) return;
-    if (this.manualModes[index] ?? (process.env.DECK_MANUAL_LOGIN === '1')) return this.startManualAccount(index);
+    if (this.manualModes[index] ?? (process.env.DECK_MANUAL_LOGIN === '1')) return this.startManualAccount(index, manualURL);
     console.log(`[startup] Abrindo Chromium da conta ${index + 1}…`);
     this.panes[index].status = 'abrindo…'; this.emitState();
     const account = await launchBrowser(profilePath(this.root, index), `PokeIdleAccount${index + 1}`, 'http://127.0.0.1:8081/blank');
@@ -122,18 +123,18 @@ export class Deck extends EventEmitter {
     if (!await this.x11.call('embed', { class: account.wmClass, parent: 'PokeIdleDeckShell' })) throw new Error('Não foi possível incorporar o navegador');
     await this.arrange();
   }
-  async startManualAccount(index) {
+  async startManualAccount(index, url = gameURL) {
     console.log(`[startup] Abrindo login manual da conta ${index + 1}…`);
     const wmClass = `PokeIdleAccount${index + 1}`;
-    const account = await launchNativeBrowser(profilePath(this.root, index), wmClass, gameURL, { requestClose: () => this.x11.call('close', { class: wmClass }, 3000) });
+    const account = await launchNativeBrowser(profilePath(this.root, index), wmClass, url, { requestClose: () => this.x11.call('close', { class: wmClass }, 3000) });
     Object.assign(account, { index, startedAt: Date.now(), pages: new Map(), liveChannels: { Twitch: [], Kick: [] } });
     this.accounts[index] = account;
     this.watchAccount(index, account);
-    this.panes[index] = { manualLogin: true, status: 'Entre no jogo e clique em Retomar recursos', startedAt: account.startedAt, restock: null, pvp: null, note: '' };
+    this.panes[index] = { manualLogin: true, status: 'Conclua o login e clique em Retomar recursos', startedAt: account.startedAt, restock: null, pvp: null, note: '' };
     await this.embedAccount(account);
     this.emitState();
   }
-  async switchLoginMode(index, manual) {
+  async switchLoginMode(index, manual, manualURL) {
     if (this.switchingAccount) throw new Error('Aguarde a troca de navegador terminar');
     if (this.config.Off[index]) throw new Error('Ligue esta conta primeiro');
     this.switchingAccount = true;
@@ -143,7 +144,7 @@ export class Deck extends EventEmitter {
       const file = path.join(this.root, 'manual-login.json');
       await writeFile(file + '.tmp', JSON.stringify(this.manualModes));
       await rename(file + '.tmp', file);
-      await this.startAccount(index, { waitForNavigation: false });
+      await this.startAccount(index, { waitForNavigation: false, manualURL });
       return true;
     } finally { this.switchingAccount = false; }
   }
@@ -459,7 +460,9 @@ export class Deck extends EventEmitter {
       }
       case 'live.login':
         if (!sites.includes(a.site)) throw new Error('Site inválido');
-        await this.newWindow(index, a.site === 'Twitch' ? 'https://www.twitch.tv/login' : 'https://kick.com/login', { key: `login:${a.site}` }); return true;
+        return this.switchLoginMode(index, true, process.env.DECK_TEST_MODE === '1'
+          ? `${gameURL}?login=${a.site}`
+          : liveLoginURLs[a.site]);
       case 'live.player':
         if (!sites.includes(a.site) || !safeChannel(a.channel)) throw new Error('Canal inválido');
         await this.newWindow(index, a.site === 'Twitch' ? `https://player.twitch.tv/?channel=${a.channel}&parent=twitch.tv&player=popout` : `https://player.kick.com/${a.channel}`, { key: `player:${a.site}:${a.channel}`, init: this.scripts.noDrm });
@@ -545,6 +548,11 @@ export class Deck extends EventEmitter {
           button: await this.accounts[0].page.$eval('#test-click', e => e.getBoundingClientRect().toJSON()),
           typing: await this.accounts[0].page.$eval('#typing', e => e.getBoundingClientRect().toJSON()),
           typingValue: await this.accounts[0].page.$eval('#typing', e => e.value),
+          sort: await this.accounts[0].page.$eval('#collection-sort', select => ({
+            bounds: select.getBoundingClientRect().toJSON(),
+            nameOption: select.matches(':open') ? select.options[1].getBoundingClientRect().toJSON() : null,
+            value: select.value,
+          })),
           window: windows.PokeIdleAccount1,
           counter: await this.accounts[0].page.$eval('#counter', e => e.textContent),
         };

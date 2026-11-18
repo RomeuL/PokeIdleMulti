@@ -101,8 +101,10 @@ export async function run(deck, persistenceOnly = false) {
   await check('manual login uses ordinary Chromium and returns to the deck with the same cookies and storage', async () => {
     const shell = deck.shell.page;
     for (let index = 0; index < 4; index++) {
-      deck.manualFixtureReady = false;
-      await deck.command('login.manual', { index });
+      deck.manualFixtureLogin = null;
+      const site = ['Twitch', 'Kick'][index];
+      if (site) await deck.command('live.login', { index, site });
+      else await deck.command('login.manual', { index });
       const manual = deck.accounts[index];
       assert.equal(manual.manualLogin, true);
       assert.equal(manual.page, undefined);
@@ -111,8 +113,8 @@ export async function run(deck, persistenceOnly = false) {
       assert.ok(!args.includes('--remote-debugging'));
       assert.ok(!args.includes('--enable-automation'));
       await shell.waitForSelector(`#pane-${index} [data-action=login-resume]`);
-      for (let attempt = 0; attempt < 150 && !deck.manualFixtureReady; attempt++) await delay(100);
-      assert.equal(deck.manualFixtureReady, true, 'Manual browser loaded the fixture and saved its own session');
+      for (let attempt = 0; attempt < 150 && !deck.manualFixtureLogin; attempt++) await delay(100);
+      assert.equal(deck.manualFixtureLogin, site || 'game', 'Manual browser loaded the expected login fixture and saved its own session');
       const windows = await deck.x11.call('inspect');
       assert.equal(windows[`PokeIdleAccount${index + 1}`].parent, windows.PokeIdleDeckShell.id);
       await deck.command('overlay', { open: true });

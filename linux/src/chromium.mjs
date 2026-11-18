@@ -98,6 +98,14 @@ export async function setupGame(account, scripts, config, onMessage, gameURL) {
   // replace browser APIs inside third-party login or verification widgets.
   const source = `(() => {
     if (window !== window.top || location.origin !== ${JSON.stringify(account.gameOrigin)}) return;
+    // The default select popup fails inside the Chromium window reparented
+    // into the X11 deck. Render single-choice dropdowns in the document.
+    if (window.CSS?.supports('appearance', 'base-select')) {
+      const dropdown = 'select:not([multiple]):is(:not([size]), [size="1"])';
+      const sheet = new CSSStyleSheet();
+      sheet.replaceSync(dropdown + ', ' + dropdown + '::picker(select) { appearance: base-select !important; }');
+      document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+    }
     window.chrome ||= {}; chrome.webview = { postMessage: value => window.__deckHostMessage(String(value)).catch(() => {}) };
     window.__deckFps=${config.GameFps}; window.__deckSpriteMs=${config.SpriteMs};\n`
     + mediaScript + `\nwindow.__deckAudio.set(${config.Muted[account.index]});\n`

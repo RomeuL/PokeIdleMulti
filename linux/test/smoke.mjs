@@ -43,6 +43,19 @@ if (!process.argv.includes('--persistence')) {
     await mouse(game.window.x + game.button.x + game.button.width / 2, game.window.y + game.button.y + game.button.height / 2);
     for (let i = 0; i < 50 && Number((await api('test.targets')).counter) === Number(game.counter); i++) await delay(100);
     assert.equal(Number((await api('test.targets')).counter), Number(game.counter) + 1);
+    const clickOnGame = bounds => mouse(game.window.x + bounds.x + bounds.width / 2, game.window.y + bounds.y + bounds.height / 2);
+    await clickOnGame(game.sort.bounds);
+    let sort;
+    for (let i = 0; i < 50; i++) {
+      sort = (await api('test.targets')).sort;
+      if (sort.nameOption?.height > 0) break;
+      await delay(100);
+    }
+    assert.ok(sort.nameOption?.height > 0, 'The collection sort dropdown opens inside the embedded game');
+    await clickOnGame(sort.nameOption);
+    for (let i = 0; i < 50 && (await api('test.targets')).sort.value !== 'name'; i++) await delay(100);
+    assert.equal((await api('test.targets')).sort.value, 'name');
+    console.log('Collection dropdown: opened and selected Nome through noVNC.');
     await verifyClipboard(page, browser);
     await page.click('#controls summary'); await page.click('#audio');
     await page.waitForFunction(() => document.querySelector('#audio').textContent === 'Desligar áudio');

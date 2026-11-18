@@ -64,7 +64,7 @@ fixtureSockets.on('connection', ws => {
   ws.on('message', data => {
     try {
       const m = JSON.parse(data.toString());
-      if (m.t === 'test.manual-ready') { deck.manualFixtureReady = true; return; }
+      if (m.t === 'test.manual-ready') { deck.manualFixtureLogin = m.login; return; }
       if (m.t === 'shop.buy') {
         const stock = m.kind === 'ball' ? estado.balls : estado.items;
         stock[m.id] = (stock[m.id] || 0) + m.qty; estado.gold -= m.qty * 10;
