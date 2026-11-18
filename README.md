@@ -6,7 +6,7 @@ Este fork inclui uma versão Linux em `linux/`, com quatro perfis completos do C
 
 ```sh
 cp .env.example .env
-# Defina WEB_PASSWORD no .env (pelo menos 16 caracteres).
+# Defina WEB_PASSWORD no .env (senha não vazia).
 docker compose up -d --build
 ```
 

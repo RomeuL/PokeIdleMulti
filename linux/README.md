@@ -12,7 +12,7 @@ Na raiz do repositório:
 
 ```sh
 cp .env.example .env
-# Edite .env e defina WEB_PASSWORD com pelo menos 16 caracteres.
+# Edite .env e defina WEB_PASSWORD com uma senha não vazia.
 docker compose up -d --build
 ```
 

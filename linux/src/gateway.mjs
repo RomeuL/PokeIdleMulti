@@ -39,7 +39,7 @@ export async function readJSON(request, max = 1024 * 1024) {
 export function sendJSON(response, value, status = 200) { response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }); response.end(JSON.stringify(value)); }
 
 export function createGateway({ root, webRoot, novncRoot, user, password, ready }) {
-  if (!password || password.length < 16) throw new Error('Defina WEB_PASSWORD com pelo menos 16 caracteres');
+  if (!password) throw new Error('Defina WEB_PASSWORD com uma senha não vazia');
   const csrf = randomBytes(32).toString('hex');
   const sockets = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
   const server = http.createServer(async (request, response) => {

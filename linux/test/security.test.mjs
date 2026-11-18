@@ -31,7 +31,8 @@ test('downloads reject traversal, absolute paths and symlinks outside exports', 
 test('gateway requires authentication and CSRF, limits public files, and protects WebSockets', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'deck-http-'));
   for (const folder of ['imports', 'exports']) await mkdir(path.join(root, folder));
-  const password = 'long-test-password', auth = 'Basic ' + Buffer.from('pokeidle:' + password).toString('base64');
+  const password = 'x', auth = 'Basic ' + Buffer.from('pokeidle:' + password).toString('base64');
+  assert.throws(() => createGateway({ password: '' }), /senha não vazia/);
   const server = createGateway({ root, webRoot: path.resolve(import.meta.dirname, '../web'), novncRoot: path.resolve(import.meta.dirname, '../node_modules/@novnc/novnc'), user: 'pokeidle', password, ready: () => true });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = 'http://127.0.0.1:' + server.address().port;

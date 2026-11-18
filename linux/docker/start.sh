@@ -2,8 +2,8 @@
 set -euo pipefail
 umask 077
 WEB_PASSWORD=${WEB_PASSWORD:-}
-if [ "${#WEB_PASSWORD}" -lt 16 ]; then
-    echo 'Defina WEB_PASSWORD com pelo menos 16 caracteres.' >&2
+if [ -z "$WEB_PASSWORD" ]; then
+    echo 'Defina WEB_PASSWORD com uma senha não vazia.' >&2
     exit 1
 fi
 mkdir -p "$XDG_RUNTIME_DIR" "$DECK_DATA_DIR/imports" "$DECK_DATA_DIR/exports" "$DECK_DATA_DIR/profiles"
