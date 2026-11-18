@@ -32,10 +32,14 @@ export class Deck extends EventEmitter {
     await this.extensions.init();
   }
   async start(shellURL) {
+    console.log('[startup] Abrindo a interface Chromium…');
     this.shell = await launchBrowser(path.join(this.root, 'ui'), 'PokeIdleDeckShell', shellURL, { kiosk: true });
     await waitForWindow(this.x11, 'PokeIdleDeckShell');
     this.shell.browser.on('disconnected', () => { if (!this.shuttingDown) this.emit('fatal', new Error('A interface foi encerrada')); });
-    for (let index = 0; index < 4; index++) if (!this.config.Off[index]) await this.startAccount(index);
+    for (let index = 0; index < 4; index++) {
+      if (this.shuttingDown) return;
+      if (!this.config.Off[index]) await this.startAccount(index, { waitForNavigation: false });
+    }
     this.timer = setInterval(() => this.tick().catch(error => this.problem(error)), 1000);
     this.emitState();
   }
@@ -48,8 +52,9 @@ export class Deck extends EventEmitter {
     this.config = await this.bridge.call('config.save', { config: validateConfig(config, this.config) });
     this.emitState(); return this.config;
   }
-  async startAccount(index) {
+  async startAccount(index, { waitForNavigation = true } = {}) {
     if (this.accounts[index]) return;
+    console.log(`[startup] Abrindo Chromium da conta ${index + 1}…`);
     this.panes[index].status = 'abrindo…'; this.emitState();
     const account = await launchBrowser(profilePath(this.root, index), `PokeIdleAccount${index + 1}`, 'http://127.0.0.1:8081/blank');
     Object.assign(account, { index, loadedAt: Date.now(), startedAt: Date.now(), retries: 0, pages: new Map(), liveChannels: { Twitch: [], Kick: [] }, points: {}, channelIds: {}, guardHold: {}, busy: false });
@@ -81,10 +86,26 @@ export class Deck extends EventEmitter {
     await waitForWindow(this.x11, account.wmClass);
     if (!await this.x11.call('embed', { class: account.wmClass, parent: 'PokeIdleDeckShell' })) throw new Error('Não foi possível incorporar o navegador');
     await this.arrange();
-    await page.goto(gameURL, { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => { this.panes[index].status = 'não carregou: sem internet ou o site caiu'; });
-    await applyGameConfig(account, this.scripts, this.config).catch(() => {});
     this.panes[index].startedAt = account.startedAt;
     this.emitState();
+    // The desktop is usable as soon as its native windows are embedded.
+    // Loading an external website must not hold the container's healthcheck.
+    account.navigationPending = true;
+    account.navigation = (async () => {
+      try {
+        await page.goto(gameURL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+      } catch {
+        if (this.accounts[index] === account) this.panes[index].status = 'não carregou: sem internet ou o site caiu';
+        console.log(`[startup] Site da conta ${index + 1} não terminou de carregar; a WebUI continua disponível.`);
+      }
+      try {
+        if (this.accounts[index] === account && !this.shuttingDown) await applyGameConfig(account, this.scripts, this.config).catch(() => {});
+      } finally {
+        account.navigationPending = false;
+        if (this.accounts[index] === account) this.emitState();
+      }
+    })();
+    if (waitForNavigation) await account.navigation;
   }
   async stopAccount(index) {
     const account = this.accounts[index]; this.accounts[index] = null;
@@ -125,7 +146,7 @@ export class Deck extends EventEmitter {
     try {
       for (let i = 0; i < 4; i++) {
         const account = this.accounts[i];
-        if (!account) continue;
+        if (!account || account.navigationPending) continue;
         try {
           const status = await evaluate(account.page, `({ restock: window.__deckRecompra?.summary() ?? null, pvp: window.__deckPvp?.status() ?? null, bonus: window.__deckBonus?.summary() ?? null, open: ${this.scripts.open}, nick: localStorage.getItem('nick') })`, 4000);
           Object.assign(this.panes[i], status);
@@ -464,6 +485,7 @@ export class Deck extends EventEmitter {
       }
       case 'test.run':
         if (process.env.DECK_TEST_MODE !== '1') throw new Error('Ação desconhecida');
+        await Promise.all(this.accounts.filter(Boolean).map(account => account.navigation));
         return (await import('../test/integration.mjs')).run(this, a.persistenceOnly);
       case 'test.targets': {
         if (process.env.DECK_TEST_MODE !== '1') throw new Error('Ação desconhecida');

@@ -14,7 +14,9 @@ for (const folder of ['', 'imports', 'exports']) await mkdir(path.join(root, fol
 const bridge = new JsonProcess(process.env.DOTNET_PATH || '/usr/share/dotnet/dotnet', [process.env.BRIDGE_PATH || path.resolve(directory, '../bridge/bin/Release/net10.0/DeckBridge.dll')]);
 const x11 = new JsonProcess('/usr/bin/python3', [path.join(directory, 'x11.py')]);
 const deck = new Deck(root, bridge, x11);
+console.log('[startup] Inicializando configuração e motor .NET…');
 await deck.init();
+console.log('[startup] Configuração carregada.');
 const token = randomBytes(32).toString('hex');
 const valid = candidate => {
   if (typeof candidate !== 'string') return false;
@@ -79,6 +81,7 @@ let ready = false;
 const gateway = createGateway({ root, webRoot: path.resolve(directory, '../web'), novncRoot: path.resolve(directory, '../node_modules/@novnc/novnc'),
   user: process.env.WEB_USER || 'pokeidle', password: process.env.WEB_PASSWORD, ready: () => ready });
 await new Promise(resolve => gateway.listen(8080, '0.0.0.0', resolve));
+console.log('[startup] Servidor WebUI escutando na porta 8080; abrindo as janelas…');
 let closing = false;
 async function close(code = 0) {
   if (closing) return; closing = true; ready = false;

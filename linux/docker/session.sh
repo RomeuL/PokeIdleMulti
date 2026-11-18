@@ -1,6 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 processes=()
+service_names=(Xvfb Openbox PulseAudio x11vnc Node)
 cleanup() {
     trap - EXIT INT TERM
     if [ "${#processes[@]}" -gt 0 ]; then
@@ -27,5 +28,11 @@ processes+=("$!")
 node /opt/deck/linux/src/app.mjs &
 processes+=("$!")
 # A failed service stops the whole container so Docker can restart it.
-wait -n "${processes[@]}"
+exit_status=0
+wait -n -p exited_process "${processes[@]}" || exit_status=$?
+service_name=desconhecido
+for index in "${!processes[@]}"; do
+    if [ "${processes[index]}" = "${exited_process:-}" ]; then service_name=${service_names[index]}; fi
+done
+echo "[startup] Serviço $service_name encerrou (código $exit_status); encerrando o container." >&2
 exit 1

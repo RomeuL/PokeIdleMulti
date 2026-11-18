@@ -13,6 +13,17 @@ if ! flock -n 9; then
     echo 'Este volume já está sendo usado por outro PokeIdle Deck.' >&2
     exit 1
 fi
+echo '[startup] Preparando dados persistentes e sessão gráfica…'
+# A replaced container has a new hostname. Chromium otherwise treats leftover
+# singleton symlinks as a profile in use on another machine. The volume lock
+# above guarantees that no other deck instance can own these profiles.
+for profile in "$DECK_DATA_DIR/ui" "$DECK_DATA_DIR"/profiles/conta{1..4}; do
+    for singleton in SingletonLock SingletonSocket SingletonCookie; do
+        if [ -L "$profile/$singleton" ]; then
+            rm -- "$profile/$singleton"
+        fi
+    done
+done
 # /tmp survives a Docker restart; X11 sockets do not survive its process namespace.
 rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
 rm -rf "$XDG_RUNTIME_DIR/pulse"

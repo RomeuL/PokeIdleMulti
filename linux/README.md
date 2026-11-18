@@ -22,6 +22,8 @@ O Compose publica a porta apenas em `127.0.0.1`. Para acessar de outro computado
 
 O menu **☰**, no canto superior direito da WebUI, oferece tela cheia, áudio, envio/download de arquivos, área de transferência e reconexão. O botão de som do cabeçalho continua controlando cada conta; **Ligar áudio** autoriza a reprodução do áudio do container no navegador.
 
+O healthcheck fica pronto quando a interface e as janelas das contas abrem; o carregamento do site continua em segundo plano. Uma resposta lenta do jogo não deve manter o container em “Deploying”. Os logs `[startup]` mostram as etapas de inicialização. Ao recriar o container, os links de bloqueio antigos do Chromium são removidos após adquirir o bloqueio exclusivo do volume; cookies, extensões e dados das contas são preservados.
+
 ```sh
 docker compose logs -f pokeidle
 docker compose stop
