@@ -4,6 +4,7 @@ import puppeteer from 'puppeteer-core';
 import { WebSocket } from 'ws';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
+import { networkInterfaces } from 'node:os';
 const token = await readFile('/tmp/deck-test-token', 'utf8');
 async function api(method) {
   const response = await fetch('http://127.0.0.1:8081/api', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Deck-Token': token }, body: JSON.stringify({ method }) });
@@ -16,6 +17,7 @@ console.log(JSON.stringify(result.result, null, 2));
 if (!process.argv.includes('--persistence')) {
   const browser = await puppeteer.launch({ executablePath: process.env.CHROME_PATH || '/usr/bin/chromium', headless: true, args: ['--no-sandbox', '--test-type'], defaultViewport: { width: 1280, height: 720 } });
   try {
+    await browser.defaultBrowserContext().overridePermissions('http://127.0.0.1:8080', ['clipboard-read', 'clipboard-write']);
     const page = await browser.newPage();
     await page.authenticate({ username: process.env.WEB_USER || 'pokeidle', password: process.env.WEB_PASSWORD });
     await page.goto('http://127.0.0.1:8080');
@@ -41,12 +43,58 @@ if (!process.argv.includes('--persistence')) {
     await mouse(game.window.x + game.button.x + game.button.width / 2, game.window.y + game.button.y + game.button.height / 2);
     for (let i = 0; i < 50 && Number((await api('test.targets')).counter) === Number(game.counter); i++) await delay(100);
     assert.equal(Number((await api('test.targets')).counter), Number(game.counter) + 1);
+    await verifyClipboard(page, browser);
     await page.click('#controls summary'); await page.click('#audio');
     await page.waitForFunction(() => document.querySelector('#audio').textContent === 'Desligar áudio');
     await page.screenshot({ path: '/data/exports/integration-webui.png' });
     await verifyAudio();
     console.log('Browser WebUI: authenticated noVNC, framebuffer, remote layout controls, embedded game clicks and audio passed.');
   } finally { await browser.close(); }
+}
+
+async function verifyClipboard(page, browser) {
+  const text = 'Copiar e colar: ação 🎮';
+  const shortcut = async (client, key) => { await client.keyboard.down('Control'); await client.keyboard.press(key); await client.keyboard.up('Control'); };
+  async function focusInput(client) {
+    const targets = await api('test.targets');
+    const canvas = await client.$eval('#screen canvas', c => ({ ...c.getBoundingClientRect().toJSON(), bw: c.width, bh: c.height }));
+    await client.mouse.click(canvas.x + (targets.window.x + targets.typing.x + targets.typing.width / 2) * canvas.width / canvas.bw,
+      canvas.y + (targets.window.y + targets.typing.y + targets.typing.height / 2) * canvas.height / canvas.bh);
+    await shortcut(client, 'a');
+  }
+  async function waitForInput(expected) {
+    for (let i = 0; i < 100 && (await api('test.targets')).typingValue !== expected; i++) await delay(100);
+    assert.equal((await api('test.targets')).typingValue, expected);
+  }
+  await page.evaluate(text => navigator.clipboard.writeText(text), text);
+  await focusInput(page); await shortcut(page, 'v'); await waitForInput(text);
+  await shortcut(page, 'a');
+  await page.evaluate(() => navigator.clipboard.writeText('previous local clipboard'));
+  await shortcut(page, 'c');
+  await page.waitForFunction(async expected => await navigator.clipboard.readText() === expected, { timeout: 10000 }, text);
+  console.log('Clipboard: Ctrl+V into the native game and Ctrl+C back to the browser preserve Unicode.');
+
+  const address = Object.values(networkInterfaces()).flat().find(value => value?.family === 'IPv4' && !value.internal)?.address;
+  assert.ok(address, 'Container network address available for HTTP fallback test');
+  const insecure = await browser.newPage();
+  try {
+    const fallbackText = 'Texto HTTP: café 🎮';
+    await page.evaluate(text => navigator.clipboard.writeText(text), fallbackText);
+    await insecure.authenticate({ username: process.env.WEB_USER || 'pokeidle', password: process.env.WEB_PASSWORD });
+    await insecure.goto(`http://${address}:8080`);
+    await insecure.waitForFunction(() => document.querySelector('#connection').hidden, { timeout: 15000 });
+    assert.equal(await insecure.evaluate(() => window.isSecureContext), false);
+    assert.equal(await insecure.evaluate(() => !!navigator.clipboard), false);
+    await focusInput(insecure); await shortcut(insecure, 'v'); await waitForInput(fallbackText);
+    await shortcut(insecure, 'a');
+    await page.bringToFront();
+    await page.evaluate(() => navigator.clipboard.writeText('previous HTTP clipboard'));
+    await insecure.bringToFront(); await shortcut(insecure, 'c');
+    await insecure.waitForFunction(() => document.querySelector('#clipboard-status').textContent === 'Texto copiado para o computador.', { timeout: 10000 });
+    await page.bringToFront();
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), fallbackText);
+    console.log('Clipboard: HTTP paste-event fallback works without navigator.clipboard.');
+  } finally { await insecure.close(); await page.bringToFront(); }
 }
 
 async function verifyAudio() {

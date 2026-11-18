@@ -45,6 +45,7 @@ jobs:
           docker run -d --name pokeidle-integration --shm-size=2g \
             -e WEB_PASSWORD=integration-only-password \
             -e DECK_TEST_MODE=1 \
+            -e DECK_MANUAL_LOGIN=1 \
             -v pokeidle-integration-data:/data pokeidle-deck:test
           for attempt in {1..90}; do
             if docker exec pokeidle-integration curl -fsS http://127.0.0.1:8080/healthz; then

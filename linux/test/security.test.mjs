@@ -32,8 +32,10 @@ test('gateway requires authentication and CSRF, limits public files, and protect
   const root = await mkdtemp(path.join(tmpdir(), 'deck-http-'));
   for (const folder of ['imports', 'exports']) await mkdir(path.join(root, folder));
   const password = 'x', auth = 'Basic ' + Buffer.from('pokeidle:' + password).toString('base64');
+  let clipboardText = '';
   assert.throws(() => createGateway({ password: '' }), /senha não vazia/);
-  const server = createGateway({ root, webRoot: path.resolve(import.meta.dirname, '../web'), novncRoot: path.resolve(import.meta.dirname, '../node_modules/@novnc/novnc'), user: 'pokeidle', password, ready: () => true });
+  const server = createGateway({ root, webRoot: path.resolve(import.meta.dirname, '../web'), novncRoot: path.resolve(import.meta.dirname, '../node_modules/@novnc/novnc'), user: 'pokeidle', password, ready: () => true,
+    clipboard: { read: async () => clipboardText, write: async text => { clipboardText = text; } } });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = 'http://127.0.0.1:' + server.address().port;
   try {
@@ -42,6 +44,12 @@ test('gateway requires authentication and CSRF, limits public files, and protect
     assert.equal((await fetch(base + '/', { headers: { Authorization: auth } })).status, 200);
     assert.equal((await fetch(base + '/api/upload?name=test.zip', { method: 'POST', headers: { Authorization: auth }, body: 'file' })).status, 403);
     const { csrf } = await (await fetch(base + '/api/session', { headers: { Authorization: auth } })).json();
+    const clipboard = value => ({ method: 'POST', headers: { Authorization: auth, 'X-Deck-CSRF': csrf, 'Content-Type': 'application/json' }, body: JSON.stringify(value) });
+    assert.equal((await fetch(base + '/api/clipboard', { method: 'POST', headers: { Authorization: auth }, body: JSON.stringify({ action: 'read' }) })).status, 403);
+    assert.equal((await fetch(base + '/api/clipboard', clipboard({ action: 'write', text: 'ação 🎮\nsegunda linha' }))).status, 200);
+    assert.equal((await (await fetch(base + '/api/clipboard', clipboard({ action: 'read' }))).json()).text, 'ação 🎮\nsegunda linha');
+    assert.equal((await fetch(base + '/api/clipboard', clipboard({ action: 'write', text: 'x'.repeat(256 * 1024 + 1) }))).status, 400);
+    assert.equal((await fetch(base + '/api/clipboard', { ...clipboard({ action: 'read' }), headers: { Authorization: auth, 'X-Deck-CSRF': csrf, Origin: 'https://other.example' } })).status, 403);
     const upload = await fetch(base + '/api/upload?name=test.zip', { method: 'POST', headers: { Authorization: auth, 'X-Deck-CSRF': csrf }, body: 'file' });
     assert.equal(upload.status, 200); assert.ok((await upload.json()).path.startsWith(path.join(root, 'imports')));
     assert.equal((await fetch(base + '/api/download?name=../secret', { headers: { Authorization: auth } })).status, 400);

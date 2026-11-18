@@ -11,6 +11,7 @@ services:
       SCREEN_HEIGHT: "${SCREEN_HEIGHT:-1080}"
       TZ: "${TZ:-America/Sao_Paulo}"
       DECK_DIAGNOSTIC_BROWSER: "${DECK_DIAGNOSTIC_BROWSER:-0}"
+      DECK_MANUAL_LOGIN: "${DECK_MANUAL_LOGIN:-0}"
     volumes:
       - deck-data:/data
     shm_size: "2gb"

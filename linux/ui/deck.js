@@ -35,16 +35,16 @@ function render() {
     pane.classList.toggle('focused', c.Focused === i);
     const ext = (state.extensions[i] || []).map(e => button('extension-popup', '🧩', `data-index="${i}" data-id="${esc(e.id)}" title="${esc(e.name)}"`)).join('');
     const connected = p.restock?.connected || p.bonus?.connected;
-    const signature = JSON.stringify([c.AccountNames[i], off, p.status, p.note, uptime(p.startedAt), c.Restock[i].On, c.Pvp[i], c.Muted[i], p.vote?.canVote, state.extensions[i]]);
+    const signature = JSON.stringify([c.AccountNames[i], off, p.manualLogin, p.status, p.note, uptime(p.startedAt), c.Restock[i].On, c.Pvp[i], c.Muted[i], p.vote?.canVote, state.extensions[i]]);
     if (pane.dataset.signature !== signature) {
       pane.dataset.signature = signature;
     pane.querySelector('.head').innerHTML = `<span class="dot ${connected ? 'ok' : off ? '' : 'warn'}">●</span><span class="name">${esc(c.AccountNames[i])}</span><span class="info" title="${esc(p.note || p.status)}">${esc(p.note || (p.status === 'jogo' || p.status === 'app' ? '· rodando há ' + uptime(p.startedAt) : p.status))}</span><span class="controls">`
-      + ext + button('live-account', 'lives', `data-index="${i}" title="Lives da Twitch/Kick nesta conta"`)
+      + (p.manualLogin ? button('login-resume', 'Retomar recursos', `data-index="${i}" class="green" title="Após entrar no jogo, reabrir o mesmo perfil com os recursos do deck"`) : ext + button('live-account', 'lives', `data-index="${i}" title="Lives da Twitch/Kick nesta conta"`)
       + button('restock', '🛒', `data-index="${i}" class="${c.Restock[i].On ? 'green' : ''}" title="Recompra"`)
       + button('pvp', '⚔', `data-index="${i}" class="${c.Pvp[i] ? 'green' : ''}" title="Fila de PvP"`)
       + button('vote', '🗳', `data-index="${i}" class="${p.vote?.canVote ? 'green' : ''}" title="Votar no TopIdle"`)
       + button('mute', c.Muted[i] ? '🔇' : '🔊', `data-index="${i}" title="Ligar/desligar som"`)
-      + button('reload', '⟳', `data-index="${i}" title="Recarregar"`)
+      + button('reload', '⟳', `data-index="${i}" title="Recarregar"`))
       + button('account', '⛶', `data-index="${i}" title="Ampliar/voltar"`)
       + button('power', '⏻', `data-index="${i}" title="${off ? 'Ligar' : 'Desligar'} esta conta"`) + '</span>';
     }
@@ -136,6 +136,8 @@ async function act(action, element) {
     case 'power': c = cloneConfig(); c.Off[i] = !c.Off[i]; await save(c); break;
     case 'mute': c = cloneConfig(); c.Muted[i] = !c.Muted[i]; await save(c); break;
     case 'reload': await call('reload', { index: i }); break;
+    case 'login-manual': closeDialog(); await call('login.manual', { index: i }); notice('Entre no jogo nesta conta e depois clique em Retomar recursos.'); break;
+    case 'login-resume': closeDialog(); await call('login.resume', { index: i }); notice('Reabrindo a conta com os recursos do deck…'); break;
     case 'vote': await call('vote', { index: i }); break;
     case 'fullscreen': document.fullscreenElement ? await document.exitFullscreen() : await document.documentElement.requestFullscreen(); break;
     case 'performance': c = state.config; await openDialog('ULTRA e desempenho', `<div class="stack">${check('reduce', '🐢 Menos animações', c.ReduceMotion)}<label>Quadros por segundo do mapa ${select('fps', [5, 10, 15, 20, 30, 60].map(x => [x, x === 60 ? '60 · sem limite' : x]), c.GameFps)}</label><label>Ritmo dos sprites (ms) ${number('sprites', c.SpriteMs, 10000, 220)}</label></div>`, button('close', 'Cancelar') + button('save-performance', 'Salvar', 'class="primary"')); break;
@@ -188,7 +190,7 @@ document.addEventListener('click', event => { const target = event.target.closes
 $('#account-buttons').addEventListener('contextmenu', async event => {
   const target = event.target.closest('[data-index]'); if (!target) return;
   event.preventDefault(); const i = Number(target.dataset.index); formIndex = i;
-  await menu(state.config.AccountNames[i], [button('account', 'Ampliar no deck / voltar', `data-index="${i}"`), button('clean', 'Recarregar limpo (sem o cache do jogo)', `data-index="${i}"`), button('rename', 'Renomear…', `data-index="${i}"`), button('wipe', 'Apagar os dados da conta (entrar de novo)…', `class="danger" data-index="${i}"`), button('live-account', 'Lives da Twitch/Kick nesta conta', `data-index="${i}"`), button('restock', 'Recompra…', `data-index="${i}"`), button('pvp-settings', '⚔ Fila de PvP…', `data-index="${i}"`), button('diagnostic', '🩺 Gerar diagnóstico…')]);
+  await menu(state.config.AccountNames[i], [button('account', 'Ampliar no deck / voltar', `data-index="${i}"`), button(state.panes[i].manualLogin ? 'login-resume' : 'login-manual', state.panes[i].manualLogin ? 'Retomar recursos do deck' : 'Entrar pelo navegador comum…', `data-index="${i}"`), button('clean', 'Recarregar limpo (sem o cache do jogo)', `data-index="${i}"`), button('rename', 'Renomear…', `data-index="${i}"`), button('wipe', 'Apagar os dados da conta (entrar de novo)…', `class="danger" data-index="${i}"`), button('live-account', 'Lives da Twitch/Kick nesta conta', `data-index="${i}"`), button('restock', 'Recompra…', `data-index="${i}"`), button('pvp-settings', '⚔ Fila de PvP…', `data-index="${i}"`), button('diagnostic', '🩺 Gerar diagnóstico…')]);
 });
 document.addEventListener('click', event => { const target = event.target.closest('[data-action=rename]'); if (target) { formIndex = Number(target.dataset.index); openDialog('Renomear conta', `<input class="wide" type="text" name="name" maxlength="64" value="${esc(state.config.AccountNames[formIndex])}">`, button('close', 'Cancelar') + button('rename-save', 'Salvar', 'class="primary"')).catch(error => notice(error.message)); } });
 document.addEventListener('keydown', event => { if (event.key === 'F11') { event.preventDefault(); act('fullscreen', {}).catch(() => {}); } });

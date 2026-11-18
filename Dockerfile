@@ -18,7 +18,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TZ=America/Sao_Paulo
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium chromium-sandbox xvfb x11vnc openbox python3 python3-xlib \
-    pulseaudio pulseaudio-utils dbus-x11 x11-utils x11-xserver-utils \
+    pulseaudio pulseaudio-utils dbus-x11 x11-utils x11-xserver-utils xclip \
     fonts-liberation fonts-noto-core fonts-noto-color-emoji \
     ca-certificates curl tini libicu76 libssl3t64 tzdata \
     && rm -rf /var/lib/apt/lists/*

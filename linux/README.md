@@ -22,6 +22,12 @@ O Compose publica a porta apenas em `127.0.0.1`. Para acessar de outro computado
 
 O menu **☰**, no canto superior direito da WebUI, oferece tela cheia, áudio, envio/download de arquivos, área de transferência e reconexão. O botão de som do cabeçalho continua controlando cada conta; **Ligar áudio** autoriza a reprodução do áudio do container no navegador.
 
+### Copiar e colar texto
+
+Com o aplicativo remoto em foco, **Ctrl+C** copia o texto selecionado para o computador e **Ctrl+V** cola o texto do computador no campo remoto. A troca aceita acentos, emojis e quebras de linha, com limite de 256 KB no envio. Ela funciona tanto no deck quanto nos navegadores de login manual e diagnóstico. Não envia imagens ou arquivos; use o menu **Arquivos** para isso.
+
+A leitura ocorre apenas quando você solicita copiar ou colar; o aplicativo não monitora a área de transferência do computador em segundo plano. HTTPS ou localhost permitem usar a Clipboard API, sujeita às permissões do navegador. No HTTP comum, o aplicativo usa o evento de colagem e tenta copiar após a ação do usuário. Se o navegador bloquear o atalho, abra **☰ → Área de transferência** e use **Colar no app** ou **Copiar para o computador**. Essa diferença é uma restrição do navegador, descrita na [documentação da Clipboard API](https://developer.mozilla.org/en-US/docs/Web/API/Clipboard_API).
+
 O healthcheck fica pronto quando a interface e as janelas das contas abrem; o carregamento do site continua em segundo plano. Uma resposta lenta do jogo não deve manter o container em “Deploying”. Os logs `[startup]` mostram as etapas de inicialização. Ao recriar o container, os links de bloqueio antigos do Chromium são removidos após adquirir o bloqueio exclusivo do volume; cookies, extensões e dados das contas são preservados.
 
 ```sh
@@ -103,6 +109,10 @@ O Chromium roda como usuário sem privilégios. Para funcionar com o perfil padr
 ### Verificação do Cloudflare
 
 Os scripts do jogo são limitados ao documento principal da origem do jogo; eles não alteram APIs nos iframes de login ou verificação. Isso evita interferências nesses componentes, mas não garante que o Cloudflare aceite este ambiente. A [documentação do Cloudflare](https://developers.cloudflare.com/cloudflare-challenges/reference/supported-browsers/) informa que navegadores automatizados, incluindo Puppeteer, não têm suporte para resolver desafios de produção.
+
+Para autenticar dentro do deck usando um Chromium comum, configure `DECK_DIAGNOSTIC_BROWSER=0` e `DECK_MANUAL_LOGIN=1`. Contas sem preferência salva abrem em login manual, mantendo os perfis persistentes em `/data/profiles/conta1` até `conta4`. Entre no jogo em cada conta e clique em **Retomar recursos** no cabeçalho. O navegador manual fecha e o deck reabre o mesmo perfil com as integrações originais. A escolha de modo por conta fica em `/data/manual-login.json`; contas já retomadas não voltam ao login manual em toda reinicialização.
+
+Também é possível clicar com o botão direito no nome da conta e escolher **Entrar pelo navegador comum…**. Durante o login manual, os recursos de automação daquela conta ficam suspensos; as outras contas continuam funcionando. Esse fluxo não soluciona desafios automaticamente e não garante que o serviço aceite a sessão depois da reabertura com as integrações. Os testes validam a preservação de cookies e armazenamento com uma fixture local; a continuidade da sessão real precisa ser confirmada no jogo. O perfil temporário do modo de diagnóstico é separado: é necessário entrar novamente nas contas persistentes do deck.
 
 Se aparecer “Verification failed”, abra “Troubleshoot” e anote o código de erro. Compare com o jogo aberto em um navegador atualizado no seu computador, na mesma rede do TrueNAS, e verifique extensões, VPN/proxy e bloqueios de DNS para `challenges.cloudflare.com`. Se persistir, envie o código e o Ray ID ao suporte do jogo, conforme as [orientações do Cloudflare](https://developers.cloudflare.com/cloudflare-challenges/troubleshooting/challenge-solve-issues/). Não é necessário alterar a porta ou a senha da WebUI para esse diagnóstico.
 

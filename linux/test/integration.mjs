@@ -98,6 +98,42 @@ export async function run(deck, persistenceOnly = false) {
     await deck.startAccount(3);
     assert.equal(await deck.accounts[3].page.evaluate(() => localStorage.getItem('isolation')), 'profile-4');
   });
+  await check('manual login uses ordinary Chromium and returns to the deck with the same cookies and storage', async () => {
+    const shell = deck.shell.page;
+    for (let index = 0; index < 4; index++) {
+      deck.manualFixtureReady = false;
+      await deck.command('login.manual', { index });
+      const manual = deck.accounts[index];
+      assert.equal(manual.manualLogin, true);
+      assert.equal(manual.page, undefined);
+      assert.equal(manual.cdp, undefined);
+      const args = await readFile(`/proc/${manual.browser.process().pid}/cmdline`, 'utf8');
+      assert.ok(!args.includes('--remote-debugging'));
+      assert.ok(!args.includes('--enable-automation'));
+      await shell.waitForSelector(`#pane-${index} [data-action=login-resume]`);
+      for (let attempt = 0; attempt < 150 && !deck.manualFixtureReady; attempt++) await delay(100);
+      assert.equal(deck.manualFixtureReady, true, 'Manual browser loaded the fixture and saved its own session');
+      const windows = await deck.x11.call('inspect');
+      assert.equal(windows[`PokeIdleAccount${index + 1}`].parent, windows.PokeIdleDeckShell.id);
+      await deck.command('overlay', { open: true });
+      await deck.command('overlay', { open: false });
+      await assert.rejects(deck.command('live.login', { index, site: 'Twitch' }), /Retomar recursos/);
+      // This is the same button the user presses after manually logging in.
+      await shell.click(`#pane-${index} [data-action=login-resume]`);
+      for (let attempt = 0; attempt < 300 && (deck.switchingAccount || !deck.accounts[index]?.navigation); attempt++) await delay(100);
+      const resumed = deck.accounts[index];
+      assert.equal(deck.switchingAccount, false);
+      assert.ok(resumed.page);
+      await resumed.navigation;
+      assert.equal(await resumed.page.evaluate(() => localStorage.getItem('isolation')), `profile-${index + 1}`);
+      assert.equal(await resumed.page.evaluate(() => localStorage.getItem('manual-session')), 'from-manual-browser');
+      const cookies = await resumed.browser.defaultBrowserContext().cookies();
+      assert.equal(cookies.find(cookie => cookie.name === 'deck_test_cookie')?.value, `cookie-${index + 1}`);
+      assert.equal(cookies.find(cookie => cookie.name === 'deck_manual_session')?.value, 'from-manual-browser');
+      assert.equal((JSON.parse(await readFile(path.join(deck.root, 'manual-login.json'), 'utf8')))[index], false);
+      await resumed.page.waitForFunction(() => window.__deckRecompra.summary().connected);
+    }
+  });
   await check('real Chromium extension content script, popup action and isolated storage', async () => {
     const destination = path.join(deck.root, 'imports', 'test-extension');
     await mkdir(destination, { recursive: true });

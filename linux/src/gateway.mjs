@@ -7,6 +7,7 @@ import { stat, readdir, realpath, rename, rm } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
+import { readClipboard, writeClipboard } from './clipboard.mjs';
 
 export function authorized(header, user, password) {
   if (typeof header !== 'string' || !header.startsWith('Basic ')) return false;
@@ -38,7 +39,7 @@ export async function readJSON(request, max = 1024 * 1024) {
 }
 export function sendJSON(response, value, status = 200) { response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }); response.end(JSON.stringify(value)); }
 
-export function createGateway({ root, webRoot, novncRoot, user, password, ready }) {
+export function createGateway({ root, webRoot, novncRoot, user, password, ready, clipboard = { read: readClipboard, write: writeClipboard } }) {
   if (!password) throw new Error('Defina WEB_PASSWORD com uma senha não vazia');
   const csrf = randomBytes(32).toString('hex');
   const sockets = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
@@ -51,6 +52,14 @@ export function createGateway({ root, webRoot, novncRoot, user, password, ready 
       }
       if (!sameOrigin(request)) return sendJSON(response, { error: 'Origem inválida' }, 403);
       if (request.method === 'GET' && url.pathname === '/api/session') return sendJSON(response, { csrf });
+      if (request.method === 'POST' && url.pathname === '/api/clipboard') {
+        if (request.headers['x-deck-csrf'] !== csrf) return sendJSON(response, { error: 'Sessão inválida' }, 403);
+        const value = await readJSON(request);
+        if (value.action === 'read') return sendJSON(response, { text: await clipboard.read() });
+        if (value.action !== 'write' || typeof value.text !== 'string' || Buffer.byteLength(value.text, 'utf8') > 256 * 1024) throw new Error('Envie apenas texto de até 256 KB');
+        await clipboard.write(value.text);
+        return sendJSON(response, { ok: true });
+      }
       if (request.method === 'GET' && url.pathname === '/api/files') {
         const files = {};
         for (const folder of ['imports', 'exports']) files[folder] = (await readdir(path.join(root, folder), { withFileTypes: true })).filter(e => e.isFile() && !e.name.startsWith('.')).map(e => e.name);

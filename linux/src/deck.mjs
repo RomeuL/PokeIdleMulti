@@ -5,6 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { launchBrowser, waitForWindow, setupGame, applyGameConfig, evaluate, browserMemory, profilePath } from './chromium.mjs';
 import { Extensions } from './extensions.mjs';
 import { validateConfig } from './config.mjs';
+import { launchNativeBrowser } from './native-browser.mjs';
 
 const safeChannel = value => /^[a-zA-Z0-9_-]{1,64}$/.test(value);
 const sites = ['Twitch', 'Kick'];
@@ -18,6 +19,8 @@ export class Deck extends EventEmitter {
   overlay = false;
   echo = false;
   shuttingDown = false;
+  manualModes = {};
+  switchingAccount = false;
   liveStatus = { Twitch: {}, Kick: {} };
   bulk = { running: false, cancelled: false, progress: [] };
   constructor(root, bridge, x11) {
@@ -30,6 +33,11 @@ export class Deck extends EventEmitter {
     const initial = await this.bridge.call('init');
     Object.assign(this, { config: initial.config, scripts: initial.scripts, balls: initial.balls, potions: initial.potions });
     await this.extensions.init();
+    try {
+      const modes = JSON.parse(await readFile(path.join(this.root, 'manual-login.json'), 'utf8'));
+      if (!modes || typeof modes !== 'object' || Array.isArray(modes) || Object.entries(modes).some(([key, value]) => !/^[0-3]$/.test(key) || typeof value !== 'boolean')) throw new Error('manual-login.json inválido');
+      this.manualModes = modes;
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
   }
   async start(shellURL) {
     console.log('[startup] Abrindo a interface Chromium…');
@@ -54,6 +62,7 @@ export class Deck extends EventEmitter {
   }
   async startAccount(index, { waitForNavigation = true } = {}) {
     if (this.accounts[index]) return;
+    if (this.manualModes[index] ?? (process.env.DECK_MANUAL_LOGIN === '1')) return this.startManualAccount(index);
     console.log(`[startup] Abrindo Chromium da conta ${index + 1}…`);
     this.panes[index].status = 'abrindo…'; this.emitState();
     const account = await launchBrowser(profilePath(this.root, index), `PokeIdleAccount${index + 1}`, 'http://127.0.0.1:8081/blank');
@@ -76,16 +85,8 @@ export class Deck extends EventEmitter {
         }
       });
     });
-    account.browser.on('disconnected', () => {
-      if (this.accounts[index] !== account || this.shuttingDown) return;
-      this.accounts[index] = null;
-      this.bridge.call('watchers.stop', { account: index }).catch(() => {});
-      this.panes[index].status = 'navegador caiu; reiniciando…'; this.emitState();
-      setTimeout(() => { if (!this.config.Off[index] && !this.shuttingDown) this.startAccount(index).catch(error => this.problem(error)); }, 3000);
-    });
-    await waitForWindow(this.x11, account.wmClass);
-    if (!await this.x11.call('embed', { class: account.wmClass, parent: 'PokeIdleDeckShell' })) throw new Error('Não foi possível incorporar o navegador');
-    await this.arrange();
+    this.watchAccount(index, account);
+    await this.embedAccount(account);
     this.panes[index].startedAt = account.startedAt;
     this.emitState();
     // The desktop is usable as soon as its native windows are embedded.
@@ -107,6 +108,44 @@ export class Deck extends EventEmitter {
     })();
     if (waitForNavigation) await account.navigation;
   }
+  watchAccount(index, account) {
+    account.browser.on('disconnected', () => {
+      if (this.accounts[index] !== account || this.shuttingDown) return;
+      this.accounts[index] = null;
+      this.bridge.call('watchers.stop', { account: index }).catch(() => {});
+      this.panes[index].status = 'navegador caiu; reiniciando…'; this.emitState();
+      setTimeout(() => { if (!this.config.Off[index] && !this.shuttingDown) this.startAccount(index).catch(error => this.problem(error)); }, 3000);
+    });
+  }
+  async embedAccount(account) {
+    await waitForWindow(this.x11, account.wmClass);
+    if (!await this.x11.call('embed', { class: account.wmClass, parent: 'PokeIdleDeckShell' })) throw new Error('Não foi possível incorporar o navegador');
+    await this.arrange();
+  }
+  async startManualAccount(index) {
+    console.log(`[startup] Abrindo login manual da conta ${index + 1}…`);
+    const account = await launchNativeBrowser(profilePath(this.root, index), `PokeIdleAccount${index + 1}`, gameURL);
+    Object.assign(account, { index, startedAt: Date.now(), pages: new Map(), liveChannels: { Twitch: [], Kick: [] } });
+    this.accounts[index] = account;
+    this.watchAccount(index, account);
+    this.panes[index] = { manualLogin: true, status: 'Entre no jogo e clique em Retomar recursos', startedAt: account.startedAt, restock: null, pvp: null, note: '' };
+    await this.embedAccount(account);
+    this.emitState();
+  }
+  async switchLoginMode(index, manual) {
+    if (this.switchingAccount) throw new Error('Aguarde a troca de navegador terminar');
+    if (this.config.Off[index]) throw new Error('Ligue esta conta primeiro');
+    this.switchingAccount = true;
+    try {
+      await this.stopAccount(index);
+      this.manualModes[index] = manual;
+      const file = path.join(this.root, 'manual-login.json');
+      await writeFile(file + '.tmp', JSON.stringify(this.manualModes));
+      await rename(file + '.tmp', file);
+      await this.startAccount(index, { waitForNavigation: false });
+      return true;
+    } finally { this.switchingAccount = false; }
+  }
   async stopAccount(index) {
     const account = this.accounts[index]; this.accounts[index] = null;
     await this.bridge.call('watchers.stop', { account: index });
@@ -125,6 +164,7 @@ export class Deck extends EventEmitter {
   async reload(index, clean = false) {
     const account = this.accounts[index];
     if (!account) return;
+    if (account.manualLogin) throw new Error('Conclua o login e clique em Retomar recursos');
     account.loadedAt = Date.now();
     if (clean) { await account.pageCdp.send('Network.clearBrowserCache'); await account.pageCdp.send('Storage.clearDataForOrigin', { origin: new URL(gameURL).origin, storageTypes: 'service_workers,cache_storage' }); }
     await account.page.goto(gameURL, { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => {});
@@ -146,9 +186,10 @@ export class Deck extends EventEmitter {
     try {
       for (let i = 0; i < 4; i++) {
         const account = this.accounts[i];
-        if (!account || account.navigationPending) continue;
+        if (!account || account.manualLogin || account.navigationPending) continue;
         try {
           const status = await evaluate(account.page, `({ restock: window.__deckRecompra?.summary() ?? null, pvp: window.__deckPvp?.status() ?? null, bonus: window.__deckBonus?.summary() ?? null, open: ${this.scripts.open}, nick: localStorage.getItem('nick') })`, 4000);
+          if (this.accounts[i] !== account) continue;
           Object.assign(this.panes[i], status);
           this.panes[i].status = status.open === 'login' ? 'na tela de login' : status.open || 'carregando…';
           const good = ['jogo', 'app', 'login', 'confirmar-email', 'escolher-nick', 'aberta em outro lugar', 'cloudflare'].includes(status.open) || status.open?.startsWith('aviso do jogo');
@@ -157,7 +198,7 @@ export class Deck extends EventEmitter {
             await writeFile(path.join(this.root, 'aberturas.log'), `${new Date().toISOString()} conta${i + 1}: ${status.open}\n`, { flag: 'a' });
             await this.reload(i);
           } else if (good) account.retries = 0;
-        } catch { this.panes[i].status = 'carregando…'; }
+        } catch { if (this.accounts[i] === account) this.panes[i].status = 'carregando…'; }
       }
       const now = Date.now();
       if (!this.memoryAt || now - this.memoryAt > 30_000) {
@@ -173,6 +214,7 @@ export class Deck extends EventEmitter {
   }
   async login(index, site) {
     const account = this.accounts[index];
+    if (account?.manualLogin) throw new Error('Conclua o login e clique em Retomar recursos');
     const cookies = await account.browser.defaultBrowserContext().cookies();
     const domain = site === 'Twitch' ? 'twitch.tv' : 'kick.com';
     const relevant = cookies.filter(c => c.domain.replace(/^\./, '') === domain || c.domain.endsWith('.' + domain));
@@ -184,6 +226,7 @@ export class Deck extends EventEmitter {
   async newWindow(index, url, { hidden = false, key = null, init = null } = {}) {
     const account = this.accounts[index];
     if (!account) throw new Error('Ligue esta conta primeiro');
+    if (account.manualLogin) throw new Error('Conclua o login e clique em Retomar recursos');
     if (key && account.pages.has(key)) {
       const p = account.pages.get(key);
       if (!p.isClosed()) { if (!hidden) await p.bringToFront(); return p; }
@@ -215,7 +258,7 @@ export class Deck extends EventEmitter {
       this.liveStatus = { Twitch: live.twitch, Kick: live.kick };
       for (let index = 0; index < 4; index++) {
         const account = this.accounts[index];
-        if (!account || !this.config.LivesAccounts.includes(index + 1)) continue;
+        if (!account || account.manualLogin || !this.config.LivesAccounts.includes(index + 1)) continue;
         for (const site of sites) {
           if (this.accounts[index] !== account || !this.config.LivesAccounts.includes(index + 1)) break;
           if (this.bulk.running && this.bulk.index === index && this.bulk.site === site) continue;
@@ -315,7 +358,7 @@ export class Deck extends EventEmitter {
     this.emitState();
   }
   async refreshVote(index) {
-    const account = this.accounts[index]; if (!account || account.voteBusy) return;
+    const account = this.accounts[index]; if (!account || account.manualLogin || account.voteBusy) return;
     account.voteAt = Date.now(); account.voteBusy = true;
     try {
       const response = await account.browser.defaultBrowserContext().cookies();
@@ -369,14 +412,19 @@ export class Deck extends EventEmitter {
   async command(method, a = {}) {
     const index = a.index ?? 0;
     if (!Number.isInteger(index) || index < 0 || index > 3) throw new Error('Conta inválida');
+    if (this.switchingAccount && !['state', 'bounds', 'overlay', 'diagnostic'].includes(method)) throw new Error('Aguarde a troca de navegador terminar');
+    const needsBrowser = ['wipe', 'vote', 'sniper'].includes(method) || method.startsWith('live.') || method.startsWith('extensions.') && method !== 'extensions.scan' || method.startsWith('bulk.') && method !== 'bulk.cancel';
+    if (needsBrowser && (this.accounts[index]?.manualLogin || a.all && this.accounts.some(account => account?.manualLogin) || method === 'extensions.copy' && this.accounts[a.from]?.manualLogin)) throw new Error('Conclua o login e clique em Retomar recursos nesta conta');
     switch (method) {
       case 'state': return this.snapshot();
+      case 'login.manual': return this.switchLoginMode(index, true);
+      case 'login.resume': return this.switchLoginMode(index, false);
       case 'bounds':
         if (!Array.isArray(a.rectangles) || a.rectangles.length !== 4 || a.rectangles.some(r => ['x', 'y', 'width', 'height'].some(k => !Number.isFinite(r[k]) || Math.abs(r[k]) > 10000))) throw new Error('Layout inválido');
         await this.arrange(a.rectangles); return true;
       case 'overlay': {
         let frames = [];
-        if (a.open && !this.overlay) frames = await Promise.all(this.accounts.map(async account => account ? (await account.page.screenshot({ type: 'jpeg', quality: 70, encoding: 'base64' }).catch(() => null)) : null));
+        if (a.open && !this.overlay) frames = await Promise.all(this.accounts.map(async account => account?.page ? (await account.page.screenshot({ type: 'jpeg', quality: 70, encoding: 'base64' }).catch(() => null)) : null));
         this.overlay = !!a.open; await this.arrange(); return frames;
       }
       case 'echo': this.echo = !!a.on; this.emitState(); return true;
@@ -480,7 +528,7 @@ export class Deck extends EventEmitter {
       case 'diagnostic': {
         const filename = `diagnostico-${new Date().toISOString().replaceAll(':', '-')}.json`;
         const report = { date: new Date().toISOString(), platform: process.platform, node: process.version,
-          browsers: await Promise.all(this.accounts.filter(Boolean).map(async account => ({ account: account.index + 1, version: await account.browser.version(), gameStatus: this.panes[account.index].status, retries: account.retries, extensions: this.extensions.list(account.index).map(({ id, version }) => ({ id, version })) }))) };
+          browsers: await Promise.all(this.accounts.filter(Boolean).map(async account => ({ account: account.index + 1, version: account.manualLogin ? 'Chromium (login manual)' : await account.browser.version(), gameStatus: this.panes[account.index].status, retries: account.retries, extensions: this.extensions.list(account.index).map(({ id, version }) => ({ id, version })) }))) };
         await writeFile(path.join(this.root, 'exports', filename), JSON.stringify(report, null, 2)); return filename;
       }
       case 'test.run':
@@ -494,6 +542,8 @@ export class Deck extends EventEmitter {
           columns: await this.shell.page.$eval('[data-action="layout"][data-value="Columns"]', e => e.getBoundingClientRect().toJSON()),
           grid: await this.shell.page.$eval('[data-action="layout"][data-value="Grid"]', e => e.getBoundingClientRect().toJSON()),
           button: await this.accounts[0].page.$eval('#test-click', e => e.getBoundingClientRect().toJSON()),
+          typing: await this.accounts[0].page.$eval('#typing', e => e.getBoundingClientRect().toJSON()),
+          typingValue: await this.accounts[0].page.$eval('#typing', e => e.value),
           window: windows.PokeIdleAccount1,
           counter: await this.accounts[0].page.$eval('#counter', e => e.textContent),
         };

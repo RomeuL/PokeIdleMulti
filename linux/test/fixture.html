@@ -3,4 +3,9 @@ localStorage.setItem('nick', 'Teste');
 let counter=0;document.getElementById('test-click').onclick=()=>document.getElementById('counter').textContent=String(++counter);
 document.getElementById('account').textContent=localStorage.getItem('isolation')||'Perfil novo';
 const socket=new WebSocket('ws://127.0.0.1:8081/fixture-ws');
+if (!window.__deckRecompra) {
+  localStorage.setItem('manual-session', 'from-manual-browser');
+  document.cookie='deck_manual_session=from-manual-browser; path=/; max-age=86400';
+  socket.addEventListener('open',()=>socket.send(JSON.stringify({t:'test.manual-ready'})));
+}
 </script></body></html>

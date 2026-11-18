@@ -1,4 +1,5 @@
 import RFB from '/novnc/core/rfb.js';
+import { setupClipboard } from './clipboard.js';
 let rfb, audioSocket, audioContext, audioNode;
 const $ = selector => document.querySelector(selector);
 function connect() {
@@ -9,7 +10,7 @@ function connect() {
   rfb.scaleViewport = true; rfb.resizeSession = false; rfb.showDotCursor = true;
   rfb.addEventListener('connect', () => { $('#connection').hidden = true; });
   rfb.addEventListener('disconnect', () => { $('#connection').hidden = false; $('#connection').textContent = 'Conexão encerrada. Use ☰ → Reconectar.'; });
-  rfb.addEventListener('clipboard', event => { $('#clipboard-text').value = event.detail.text; });
+  rfb.addEventListener('clipboard', event => clipboard.received(event.detail.text));
 }
 $('#fullscreen').onclick = () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
 document.addEventListener('keydown', event => {
@@ -18,8 +19,7 @@ document.addEventListener('keydown', event => {
   $('#fullscreen').click();
 }, true);
 $('#reconnect').onclick = connect;
-$('#clipboard').onclick = () => $('#clipboard-dialog').showModal();
-$('#clipboard-send').onclick = () => { rfb.clipboardPasteFrom($('#clipboard-text').value); $('#clipboard-dialog').close(); };
+const clipboard = setupClipboard(() => rfb);
 for (const button of document.querySelectorAll('[data-close]')) button.onclick = () => button.closest('dialog').close();
 async function listFiles() {
   const files = await (await fetch('/api/files')).json();
