@@ -17,7 +17,7 @@ console.log(JSON.stringify(result.result, null, 2));
 if (!process.argv.includes('--persistence')) {
   const browser = await puppeteer.launch({ executablePath: process.env.CHROME_PATH || '/usr/bin/chromium', headless: true, args: ['--no-sandbox', '--test-type'], defaultViewport: { width: 1280, height: 720 } });
   try {
-    await browser.defaultBrowserContext().overridePermissions('http://127.0.0.1:8080', ['clipboard-read', 'clipboard-write']);
+    await browser.defaultBrowserContext().overridePermissions('http://127.0.0.1:8080', ['clipboard-read', 'clipboard-write', 'clipboard-sanitized-write']);
     const page = await browser.newPage();
     await page.authenticate({ username: process.env.WEB_USER || 'pokeidle', password: process.env.WEB_PASSWORD });
     await page.goto('http://127.0.0.1:8080');
