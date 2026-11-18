@@ -57,7 +57,7 @@ export class Deck extends EventEmitter {
     account.bridgeExtension = (await account.cdp.send('Extensions.loadUnpacked', { path: path.resolve(import.meta.dirname, '../chrome-bridge') })).id;
     await account.cdp.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: path.join(this.root, 'exports') });
     await this.extensions.load(index);
-    await setupGame(account, this.scripts, this.config, message => this.gameMessage(index, message));
+    await setupGame(account, this.scripts, this.config, message => this.gameMessage(index, message), gameURL);
     const page = account.page;
     page.on('domcontentloaded', () => applyGameConfig(account, this.scripts, this.config).catch(error => this.problem(error)));
     page.on('load', () => { account.loadedAt = Date.now(); applyGameConfig(account, this.scripts, this.config).catch(error => this.problem(error)); });

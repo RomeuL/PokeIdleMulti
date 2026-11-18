@@ -97,3 +97,9 @@ docker volume rm pokeidle-integration-data
 `DECK_TEST_MODE=1` substitui o jogo por uma fixture local e habilita as ações de integração apenas na API interna. Não use esse modo para jogar. O Chromium usa um pipe privado para DevTools; nenhuma porta DevTools ou VNC é publicada. A API de controle fica no loopback do container e exige um token aleatório por execução. A WebUI exige autenticação também nos WebSockets e aplica proteção de origem e CSRF no envio de arquivos.
 
 O Chromium roda como usuário sem privilégios. Para funcionar com o perfil padrão de isolamento do Docker, ele usa `--no-sandbox`; o container é a fronteira de isolamento e não deve receber volumes sensíveis do host. Nenhum socket do host ou modo privilegiado é necessário.
+
+### Verificação do Cloudflare
+
+Os scripts do jogo são limitados ao documento principal da origem do jogo; eles não alteram APIs nos iframes de login ou verificação. Isso evita interferências nesses componentes, mas não garante que o Cloudflare aceite este ambiente. A [documentação do Cloudflare](https://developers.cloudflare.com/cloudflare-challenges/reference/supported-browsers/) informa que navegadores automatizados, incluindo Puppeteer, não têm suporte para resolver desafios de produção.
+
+Se aparecer “Verification failed”, abra “Troubleshoot” e anote o código de erro. Compare com o jogo aberto em um navegador atualizado no seu computador, na mesma rede do TrueNAS, e verifique extensões, VPN/proxy e bloqueios de DNS para `challenges.cloudflare.com`. Se persistir, envie o código e o Ray ID ao suporte do jogo, conforme as [orientações do Cloudflare](https://developers.cloudflare.com/cloudflare-challenges/troubleshooting/challenge-solve-issues/). Não é necessário alterar a porta ou a senha da WebUI para esse diagnóstico.

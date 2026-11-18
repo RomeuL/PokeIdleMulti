@@ -90,14 +90,19 @@ export const mediaScript = `(() => {
   document.addEventListener('play', event => { if (event.target instanceof HTMLMediaElement) event.target.muted = window.__deckAudio.muted; }, true);
 })();`;
 
-export async function setupGame(account, scripts, config, onMessage) {
+export async function setupGame(account, scripts, config, onMessage, gameURL) {
   const { page } = account;
+  account.gameOrigin = new URL(gameURL).origin;
   await page.exposeFunction('__deckHostMessage', onMessage);
-  const source = `window.chrome ||= {}; chrome.webview = { postMessage: value => window.__deckHostMessage(String(value)).catch(() => {}) };
+  // Puppeteer runs document scripts in child frames too. Game hooks must not
+  // replace browser APIs inside third-party login or verification widgets.
+  const source = `(() => {
+    if (window !== window.top || location.origin !== ${JSON.stringify(account.gameOrigin)}) return;
+    window.chrome ||= {}; chrome.webview = { postMessage: value => window.__deckHostMessage(String(value)).catch(() => {}) };
     window.__deckFps=${config.GameFps}; window.__deckSpriteMs=${config.SpriteMs};\n`
     + mediaScript + `\nwindow.__deckAudio.set(${config.Muted[account.index]});\n`
     + [scripts.frames, scripts.sprites, scripts.echo, scripts.recompra, scripts.pvp, scripts.bonus].join('\n')
-    + `\naddEventListener('keydown', e => { if (e.key === 'F11') { e.preventDefault(); chrome.webview.postMessage('F11'); } }, true);`;
+    + `\naddEventListener('keydown', e => { if (e.key === 'F11') { e.preventDefault(); chrome.webview.postMessage('F11'); } }, true);\n})();`;
   await page.evaluateOnNewDocument(source);
   await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: config.ReduceMotion ? 'reduce' : 'no-preference' }]);
   const client = await page.createCDPSession();
