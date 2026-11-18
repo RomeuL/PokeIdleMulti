@@ -8,7 +8,10 @@ const commandLines = await Promise.all((await readdir('/proc')).filter(name => /
 const native = commandLines.find(line => line.includes('--class=PokeIdleDiagnostic') && !line.includes('--type='));
 assert.ok(native, 'Standalone diagnostic Chromium process is running');
 assert.ok(native.includes('--user-data-dir=') && native.includes('diagnostic-profile-'));
-for (const flag of ['--remote-debugging', '--enable-automation', '--load-extension', '--test-type']) assert.ok(!native.includes(flag), `Diagnostic browser must not use ${flag}`);
+for (const flag of ['--remote-debugging', '--enable-automation', '--test-type']) assert.ok(!native.includes(flag), `Diagnostic browser must not use ${flag}`);
+// Debian's normal Chromium launcher adds --load-extension= even when its
+// extension directory is empty. Reject loaded paths, not that empty switch.
+for (const arg of native.split('\0').filter(arg => arg.startsWith('--load-extension'))) assert.equal(arg, '--load-extension=', `An extension was loaded: ${arg}`);
 assert.ok(!commandLines.some(line => line.includes('DeckBridge.dll') || line.includes('--class=PokeIdleAccount')));
 
 // Only the outer noVNC web client is automated for this test. The diagnostic
