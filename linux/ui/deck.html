@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="pt-BR">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PokeIdle Deck</title><link rel="stylesheet" href="/deck.css"></head>
+<body>
+  <header id="bar">
+    <strong class="brand">PokeIdle Deck</strong><i></i>
+    <button data-action="layout" data-value="Grid">Grade 2×2</button><button data-action="layout" data-value="Columns">Colunas</button><button data-action="focus">Foco</button><i></i>
+    <span id="account-buttons"></span><i></i><button id="echo" data-action="echo">⇄ Eco</button><i></i>
+    <button data-action="zoom" data-value="-">−</button><button id="zoom" data-action="zoom-menu">Zoom 100%</button><button data-action="zoom" data-value="+">+</button>
+    <span class="spacer"></span>
+    <button data-action="lives">Lives ▾</button><button data-action="extensions">🧩 Extensões</button><button data-action="sniper">🎯 Sniper ▾</button>
+    <button id="ultra" data-action="ultra">⚡ ULTRA</button><button data-action="performance">▾</button><button data-action="fullscreen">⛶ Tela cheia</button>
+  </header>
+  <main id="grid"></main>
+  <footer id="status"><span id="memory">RAM: medindo…</span><span>·</span><span id="lives-status"></span><span>·</span><span id="vote-status"></span><span class="spacer"></span><span id="notice"></span></footer>
+  <dialog id="dialog"><header><h1 id="dialog-title"></h1><button id="close-dialog" aria-label="Fechar">×</button></header><section id="dialog-body"></section><footer id="dialog-footer"></footer></dialog>
+  <script type="module" src="/deck.js"></script>
+</body></html>

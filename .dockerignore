@@ -1,0 +1,11 @@
+.git
+**/node_modules
+**/bin
+**/obj
+.env
+data
+**/test-results
+.superdesign
+nudes
+*.zip
+*.exe

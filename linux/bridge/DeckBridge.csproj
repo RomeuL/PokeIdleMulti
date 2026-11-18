@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <InvariantGlobalization>false</InvariantGlobalization>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="../../PokeIdleMulti/recompra.js" LogicalName="recompra.js" />
+    <EmbeddedResource Include="../../PokeIdleMulti/pvp.js" LogicalName="pvp.js" />
+    <EmbeddedResource Include="../../PokeIdleMulti/bonus.js" LogicalName="bonus.js" />
+    <Compile Include="../../PokeIdleMulti/DeckConfig.cs" Link="Upstream/DeckConfig.cs" />
+    <Compile Include="../../PokeIdleMulti/Restock.cs" Link="Upstream/Restock.cs" />
+    <Compile Include="../../PokeIdleMulti/Pvp.cs" Link="Upstream/Pvp.cs" />
+    <Compile Include="../../PokeIdleMulti/Echo.cs" Link="Upstream/Echo.cs" />
+    <Compile Include="../../PokeIdleMulti/BonusGuard.cs" Link="Upstream/BonusGuard.cs" />
+    <Compile Include="../../PokeIdleMulti/PointsRedeemer.cs" Link="Upstream/PointsRedeemer.cs" />
+    <Compile Include="../../PokeIdleMulti/TwitchLive.cs" Link="Upstream/TwitchLive.cs" />
+    <Compile Include="../../PokeIdleMulti/KickLive.cs" Link="Upstream/KickLive.cs" />
+    <Compile Include="../../PokeIdleMulti/TwitchWatcher.cs" Link="Upstream/TwitchWatcher.cs" />
+    <Compile Include="../../PokeIdleMulti/KickWatcher.cs" Link="Upstream/KickWatcher.cs" />
+    <Compile Include="../../PokeIdleMulti/TwitchPubSub.cs" Link="Upstream/TwitchPubSub.cs" />
+  </ItemGroup>
+</Project>

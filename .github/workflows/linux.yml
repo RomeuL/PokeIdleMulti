@@ -1,0 +1,68 @@
+name: Linux Docker WebUI
+on:
+  push:
+    branches: [main, feat/docker-linux-webui]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: linux/package-lock.json
+      - name: Verify extracted upstream scripts
+        run: python3 linux/tools/sync-upstream.py --check
+      - name: Install dependencies and test gateway
+        working-directory: linux
+        run: npm ci --no-fund --no-audit && npm test
+      - name: Build Linux image
+        run: docker build -t pokeidle-deck:test .
+      - name: Start isolated integration container
+        run: |
+          docker run -d --name pokeidle-integration --shm-size=2g \
+            -e WEB_PASSWORD=integration-only-password \
+            -e DECK_TEST_MODE=1 \
+            -v pokeidle-integration-data:/data pokeidle-deck:test
+          for attempt in {1..90}; do
+            if docker exec pokeidle-integration curl -fsS http://127.0.0.1:8080/healthz; then exit 0; fi
+            sleep 2
+          done
+          docker logs pokeidle-integration
+          exit 1
+      - name: Test native Chromium windows and browser WebUI
+        run: docker exec pokeidle-integration npm run smoke
+      - name: Verify profile persistence after container restart
+        run: |
+          docker restart pokeidle-integration
+          for attempt in {1..90}; do
+            if docker exec pokeidle-integration curl -fsS http://127.0.0.1:8080/healthz; then
+              docker exec pokeidle-integration node test/smoke.mjs --persistence
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+      - name: Collect test screenshots and logs
+        if: always()
+        run: |
+          mkdir -p test-results
+          docker logs pokeidle-integration > test-results/container.log 2>&1 || true
+          docker cp pokeidle-integration:/data/exports/. test-results/ || true
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: linux-integration
+          path: test-results
+          retention-days: 7
+      - name: Clean up test container
+        if: always()
+        run: |
+          docker rm -f pokeidle-integration || true
+          docker volume rm pokeidle-integration-data || true

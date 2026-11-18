@@ -1,5 +1,21 @@
 # PokeIdle Deck
 
+## Linux / Docker com acesso pelo navegador
+
+Este fork inclui uma versão Linux em `linux/`, com quatro perfis completos do Chromium e acesso web via noVNC. O projeto Windows original continua em `PokeIdleMulti/`.
+
+```sh
+cp .env.example .env
+# Defina WEB_PASSWORD no .env (pelo menos 16 caracteres).
+docker compose up -d --build
+```
+
+Abra **http://localhost:8080**. Usuário padrão: `pokeidle`; senha: a definida em `.env`. Configurações, extensões e sessões ficam no volume persistente `deck-data`.
+
+Veja [instalação, migração, funcionalidades e limites de validação](linux/README.md).
+
+---
+
 Várias contas do [pokeidle.io](https://pokeidle.io/app) numa janela só, gastando pouco do PC.
 
 O deck é um programa para Windows que abre 4 contas do jogo lado a lado. Cada uma roda num perfil próprio

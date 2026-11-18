@@ -5,3 +5,12 @@ obj/
 *.user
 *.exe
 *.zip
+# Linux / Docker: never publish profiles, tokens, or local credentials.
+.env
+.env.*
+!.env.example
+data/
+node_modules/
+test-results/
+.superdesign/
+*.part

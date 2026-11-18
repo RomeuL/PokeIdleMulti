@@ -1,0 +1,6 @@
+<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PokeIdle Deck</title><link rel="stylesheet" href="/web.css"></head><body>
+<main id="screen"></main><p id="connection">Conectando ao PokeIdle Deck…</p>
+<details id="controls"><summary title="Controles da WebUI">☰</summary><div class="panel"><strong>PokeIdle Deck</strong><button id="fullscreen">Tela cheia</button><button id="audio">Ligar áudio</button><button id="files">Arquivos</button><button id="clipboard">Colar texto</button><button id="reconnect">Reconectar</button></div></details>
+<dialog id="file-dialog"><h2>Arquivos</h2><p>Envie extensões ZIP/CRX ou arquivos de configuração. No deck, use o caminho em <code>/data/imports</code>.</p><input type="file" id="upload"><p id="upload-status"></p><h3>Enviados</h3><div id="imports"></div><h3>Downloads e diagnósticos</h3><div id="exports"></div><button data-close>Fechar</button></dialog>
+<dialog id="clipboard-dialog"><h2>Colar texto no deck</h2><p>Copie o texto abaixo para a área de transferência do deck e cole no campo desejado com Ctrl+V.</p><textarea id="clipboard-text" rows="6"></textarea><button id="clipboard-send">Copiar para o deck</button><button data-close>Fechar</button></dialog>
+<script type="module" src="/web.js"></script></body></html>
