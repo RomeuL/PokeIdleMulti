@@ -105,3 +105,15 @@ O Chromium roda como usuário sem privilégios. Para funcionar com o perfil padr
 Os scripts do jogo são limitados ao documento principal da origem do jogo; eles não alteram APIs nos iframes de login ou verificação. Isso evita interferências nesses componentes, mas não garante que o Cloudflare aceite este ambiente. A [documentação do Cloudflare](https://developers.cloudflare.com/cloudflare-challenges/reference/supported-browsers/) informa que navegadores automatizados, incluindo Puppeteer, não têm suporte para resolver desafios de produção.
 
 Se aparecer “Verification failed”, abra “Troubleshoot” e anote o código de erro. Compare com o jogo aberto em um navegador atualizado no seu computador, na mesma rede do TrueNAS, e verifique extensões, VPN/proxy e bloqueios de DNS para `challenges.cloudflare.com`. Se persistir, envie o código e o Ray ID ao suporte do jogo, conforme as [orientações do Cloudflare](https://developers.cloudflare.com/cloudflare-challenges/troubleshooting/challenge-solve-issues/). Não é necessário alterar a porta ou a senha da WebUI para esse diagnóstico.
+
+Para comparar com um navegador comum dentro do mesmo container, configure `DECK_DIAGNOSTIC_BROWSER=1` no `.env` e recrie o serviço. No YAML do TrueNAS, acrescente a variável em `services.pokeidle.environment`:
+
+```yaml
+DECK_DIAGNOSTIC_BROWSER: "1"
+```
+
+Esse modo abre uma única janela Chromium com barra de endereços, sem Puppeteer, CDP, extensões ou scripts do deck. O perfil é temporário e separado das quatro contas; os dados existentes em `/data` são preservados. O deck e suas automações ficam suspensos durante a comparação. A porta, a autenticação e o acesso por noVNC continuam iguais.
+
+Abra o jogo e faça a verificação manualmente. Se falhar, use a barra de endereços desse Chromium para abrir `https://debug.challenges.cloudflare.com`, ferramenta indicada pelo Cloudflare, e registre o resultado. Passar nesse modo sugere interferência das integrações ou do perfil normal; falhar também nesse modo exige investigar o Chromium, o ambiente do container e sua conexão. Nenhum dos resultados identifica sozinho a causa exata, nem garante aprovação no jogo.
+
+Depois do teste, remova a variável ou volte para `"0"` e recrie o serviço para restaurar o deck completo. O modo de diagnóstico não soluciona desafios automaticamente, não transfere cookies e não altera os sinais de identificação do navegador.

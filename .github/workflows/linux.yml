@@ -54,6 +54,25 @@ jobs:
             sleep 2
           done
           exit 1
+      - name: Test manual diagnostic browser without a CDP connection
+        run: |
+          mkdir -p test-results
+          docker logs pokeidle-integration > test-results/deck-container.log 2>&1
+          docker rm -f pokeidle-integration
+          docker run -d --name pokeidle-integration --shm-size=2g \
+            -e WEB_PASSWORD=integration-only-password \
+            -e DECK_TEST_MODE=1 \
+            -e DECK_DIAGNOSTIC_BROWSER=1 \
+            -v pokeidle-integration-data:/data pokeidle-deck:test
+          for attempt in {1..60}; do
+            if docker exec pokeidle-integration curl -fsS http://127.0.0.1:8080/healthz; then
+              docker exec pokeidle-integration node test/diagnostic-smoke.mjs
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs pokeidle-integration
+          exit 1
       - name: Collect test screenshots and logs
         if: always()
         run: |

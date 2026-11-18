@@ -25,7 +25,11 @@ pulseaudio --daemonize=no --exit-idle-time=-1 --log-target=stderr \
 processes+=("$!")
 x11vnc -display "$DISPLAY" -localhost -rfbport 5900 -forever -shared -nopw -noxdamage -quiet &
 processes+=("$!")
-node /opt/deck/linux/src/app.mjs &
+application=/opt/deck/linux/src/app.mjs
+if [ "${DECK_DIAGNOSTIC_BROWSER:-0}" = 1 ]; then
+    application=/opt/deck/linux/src/diagnostic-browser.mjs
+fi
+node "$application" &
 processes+=("$!")
 # A failed service stops the whole container so Docker can restart it.
 exit_status=0
