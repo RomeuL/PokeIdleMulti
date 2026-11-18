@@ -129,7 +129,7 @@ export async function run(deck, persistenceOnly = false) {
       assert.equal(await resumed.page.evaluate(() => localStorage.getItem('manual-session')), 'from-manual-browser');
       const cookies = await resumed.browser.defaultBrowserContext().cookies();
       assert.equal(cookies.find(cookie => cookie.name === 'deck_test_cookie')?.value, `cookie-${index + 1}`);
-      assert.equal(cookies.find(cookie => cookie.name === 'deck_manual_session')?.value, 'from-manual-browser');
+      assert.equal(cookies.find(cookie => cookie.name === 'deck_manual_session')?.value, 'from-manual-browser', `Account ${index + 1}: newly issued manual-login cookie persisted`);
       assert.equal((JSON.parse(await readFile(path.join(deck.root, 'manual-login.json'), 'utf8')))[index], false);
       await resumed.page.waitForFunction(() => window.__deckRecompra.summary().connected);
     }

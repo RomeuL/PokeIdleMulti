@@ -8,6 +8,7 @@ import json
 import sys
 import time
 from Xlib import X, display, error
+from Xlib.protocol import event
 
 d = display.Display()
 root = d.screen().root
@@ -108,6 +109,15 @@ def run(method, a):
         else:
             window.configure(x=max(0, int(a['x'])), y=max(0, int(a['y'])),
                              width=max(1, int(a['width'])), height=max(1, int(a['height'])))
+        d.sync()
+        return True
+    if method == 'close':
+        window = windows.get(a['class']) or find_window(a['class'])
+        if not window:
+            return False
+        message = event.ClientMessage(window=window, client_type=d.intern_atom('WM_PROTOCOLS'),
+                                      data=(32, [d.intern_atom('WM_DELETE_WINDOW'), X.CurrentTime, 0, 0, 0]))
+        window.send_event(message, event_mask=X.NoEventMask)
         d.sync()
         return True
     if method == 'focus':

@@ -5,7 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 // Ordinary Chromium for user-controlled login. No DevTools connection, page
 // scripts, UA overrides or deck extensions are installed in this process.
-export async function launchNativeBrowser(profile, wmClass, url) {
+export async function launchNativeBrowser(profile, wmClass, url, { requestClose } = {}) {
   await mkdir(profile, { recursive: true });
   const child = spawn(process.env.CHROME_PATH || '/usr/bin/chromium', [
     '--no-sandbox', '--ozone-platform=x11', '--no-first-run', '--no-default-browser-check',
@@ -20,6 +20,13 @@ export async function launchNativeBrowser(profile, wmClass, url) {
   browser.close = () => closing ||= (async () => {
     if (child.exitCode !== null || child.signalCode !== null) return;
     const exited = once(child, 'exit');
+    if (requestClose) {
+      // WM_DELETE_WINDOW follows Chromium's regular shutdown path, including
+      // flushing newly issued login cookies. SIGTERM alone can lose them.
+      await requestClose().catch(() => {});
+      await Promise.race([exited, delay(10000, null, { ref: false })]);
+      if (child.exitCode !== null || child.signalCode !== null) return;
+    }
     child.kill('SIGTERM');
     await Promise.race([exited, delay(5000, null, { ref: false })]);
     if (child.exitCode === null && child.signalCode === null) {

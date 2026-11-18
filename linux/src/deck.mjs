@@ -124,7 +124,8 @@ export class Deck extends EventEmitter {
   }
   async startManualAccount(index) {
     console.log(`[startup] Abrindo login manual da conta ${index + 1}…`);
-    const account = await launchNativeBrowser(profilePath(this.root, index), `PokeIdleAccount${index + 1}`, gameURL);
+    const wmClass = `PokeIdleAccount${index + 1}`;
+    const account = await launchNativeBrowser(profilePath(this.root, index), wmClass, gameURL, { requestClose: () => this.x11.call('close', { class: wmClass }, 3000) });
     Object.assign(account, { index, startedAt: Date.now(), pages: new Map(), liveChannels: { Twitch: [], Kick: [] } });
     this.accounts[index] = account;
     this.watchAccount(index, account);
